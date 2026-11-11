@@ -8,7 +8,7 @@ import { KOKORO_DEFAULT_VOICE, KOKORO_MB, KOKORO_VOICES, kokoroReady, speakWithK
 import { extractFirstFrame, extractFrameAt, extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { presenter } from "./presenter.js";
-import { characterLook, createCharacter, collectAssets, createProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { characterLook, createCharacter, collectAssets, createProject, listAccounts, openProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job } from "./queue.js";
 import { BIN, COMPUTER, moveToBin } from "./platform.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -396,6 +396,10 @@ export const shapes = {
         "The character's whole description AFTER the change, e.g. the old one with 'navy coat' swapped for 'red coat'. Scenes quote it word for word to hold the design, so a stale colour in it fights the new portrait. Without it, the change is added to the end of the old description.",
       ),
   },
+  accounts: {},
+  open_project: {
+    url: z.string().min(1).describe("Project address from flow_accounts, e.g. https://flow.google.com/u/1/project/<id>. The Flow window switches to it, account included."),
+  },
   new_project: {
     title: z.string().max(80).optional().describe("Name for the new project, e.g. 'Desk lamp UGC ad'. Default: Flow's own date-and-time name."),
   },
@@ -453,6 +457,8 @@ export interface Core {
   techniques(a: Args<"techniques">): Promise<unknown>;
   voices(): Promise<unknown>;
   narrate(a: Args<"narrate">): Promise<unknown>;
+  accounts(a: Args<"accounts">): Promise<unknown>;
+  open_project(a: Args<"open_project">): Promise<unknown>;
   new_project(a: Args<"new_project">): Promise<unknown>;
   character(a: Args<"character">): Promise<unknown>;
   characters(): Promise<unknown>;
@@ -785,6 +791,16 @@ export class LocalCore implements Core {
   async collect({ collection, items }: Args<"collect">) {
     if (this.queue.busy) throw new Error(BUSY);
     return collectAssets(collection, items);
+  }
+
+  async accounts(_: Args<"accounts">) {
+    if (this.queue.busy) throw new Error(BUSY);
+    return listAccounts();
+  }
+
+  async open_project({ url }: Args<"open_project">) {
+    if (this.queue.busy) throw new Error(BUSY);
+    return openProject(url);
   }
 
   async new_project({ title }: Args<"new_project">) {

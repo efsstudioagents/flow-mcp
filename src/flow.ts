@@ -2001,6 +2001,54 @@ export async function runAgentBatch(job: Job): Promise<string[]> {
 // A fresh Flow project, so a film can start from scratch without anyone clicking. Mapped live (2026-10-30): Flow's home
 // page has one button "New project", which opens /project/<uuid>; on the project page the name is a text box whose
 // accessible name is "Editable text" (it holds Flow's default name, e.g. "Oct 29 - 22:17").
+export interface FlowAccount { index: number; email: string; name: string; projects: { id: string; title: string; url: string }[] }
+
+// Every Google account signed in to the Flow Chrome profile, with its Flow projects. Read in a separate tab so the
+// main Flow tab (and anything it is doing) is not touched. Flow sends an unknown /u/N/ back to /u/0/, which ends the list.
+export async function listAccounts(): Promise<FlowAccount[]> {
+  const main = await getFlowPage();
+  const page = await main.context().newPage();
+  const out: FlowAccount[] = [];
+  try {
+    for (let index = 0; index < 8; index++) {
+      await page.goto(inEnglish(`https://flow.google.com/u/${index}/`), { waitUntil: "domcontentloaded" });
+      await page.locator("flow-project-card").first().waitFor({ timeout: 12_000 }).catch(() => {});
+      const shown = Number(page.url().match(/\/u\/(\d+)\//)?.[1] ?? 0);
+      if (shown !== index) break;
+      const read = await page.evaluate(() => {
+        const label = [...document.querySelectorAll("[aria-label]")].map((e) => e.getAttribute("aria-label") ?? "").find((l) => /^Google Account:/.test(l)) ?? "";
+        const m = label.replace(/\s+/g, " ").match(/^Google Account: (.*?) \(([^)]+)\)/);
+        const projects = [...document.querySelectorAll("flow-project-card")].map((card) => {
+          const href = card.querySelector('a[href*="/project/"]')?.getAttribute("href") ?? "";
+          const title = ((card as HTMLElement).innerText || "").replace(/\s+/g, " ").replace(/\s*edit\s*delete\s*$/i, "").trim();
+          return { href, title };
+        }).filter((x) => x.href);
+        return { name: m?.[1] ?? "", email: m?.[2] ?? "", projects };
+      });
+      if (!read.email) break;
+      out.push({
+        index,
+        email: read.email,
+        name: read.name,
+        projects: read.projects.map((x) => ({ id: x.href.match(/project\/([0-9a-f-]{36})/)?.[1] ?? "", title: x.title, url: `https://flow.google.com${x.href}` })),
+      });
+    }
+  } finally {
+    await page.close().catch(() => {});
+  }
+  return out;
+}
+
+// Points the Flow tab at another project, in whichever signed-in account owns it. Every later job runs there.
+export async function openProject(url: string): Promise<FlowState> {
+  if (!/^https:\/\/flow\.google\.com\/(u\/\d+\/)?project\/[0-9a-f-]{36}/.test(url)) throw new Error(`Not a Flow project address: ${url}`);
+  const page = await getFlowPage();
+  await page.goto(inEnglish(url), { waitUntil: "domcontentloaded" });
+  await page.waitForURL(/\/project\//, { timeout: 30_000 }).catch(() => {});
+  await pause(page, 2500);
+  return getFlowState(true);
+}
+
 export async function createProject(title?: string): Promise<{ id: string; url: string; title: string }> {
   const page = await getFlowPage();
   await page.goto(inEnglish("https://flow.google.com/"), { waitUntil: "domcontentloaded" });

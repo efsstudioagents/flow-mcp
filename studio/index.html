@@ -52,6 +52,14 @@ a{color:var(--amber)}
 .stage{min-width:0;padding:22px 36px 120px}
 .topbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;margin-bottom:6px}
 .crumb{font:600 11px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.where{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px 7px;border:1px solid var(--line2);border-radius:12px;background:var(--panel);color:var(--text);cursor:pointer;text-align:left;max-width:min(520px,100%);transition:border-color .15s}
+.where:hover{border-color:var(--safe)}
+.where b{font:600 15px var(--sans);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.where .chev{color:var(--safe)}
+.acct{margin-top:14px}
+.acct h4{display:flex;justify-content:space-between;gap:10px;align-items:baseline;font:400 22px/1.1 var(--serif)}
+.acct h4 small{font:600 11px var(--mono);color:var(--dim)}
+.lib button.cur{border-color:var(--safe);background:var(--safe-soft)}
 .status{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font:600 13px var(--mono)}
 .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--line2);border-radius:99px;background:var(--panel);color:var(--text)}
 .tally{width:9px;height:9px;border-radius:50%;background:var(--faint)}
@@ -289,7 +297,7 @@ dialog h2{font-size:34px}
 
   <main class="stage">
     <div class="topbar">
-      <span class="crumb" id="crumb">Projeto aberto no Flow</span>
+      <button type="button" class="where" id="where" title="Trocar a conta ou o projeto do Flow"><span class="crumb">Conta e projeto do Flow <span class="chev">· trocar</span></span><b id="whereName">Projeto aberto no Flow</b></button>
       <div class="status" id="status"><span class="pill"><i class="tally"></i>Conectando…</span></div>
     </div>
     <div id="offline"></div>
@@ -529,6 +537,7 @@ dialog h2{font-size:34px}
   <button class="roll" id="roll">Gerar</button>
 </div></div>
 
+<dialog id="acctDlg"><h2>Conta e projeto</h2><p class="empty">Onde as próximas gerações vão ser feitas. Personagens e coleções são de cada projeto.</p><div id="acctList"><p class="empty">Lendo as contas do Flow…</p></div><div class="rowbtns"><button class="btn small ghost" onclick="acctDlg.close()">Fechar</button><button class="btn small ghost" id="acctReload">Recarregar</button></div></dialog>
 <dialog id="picker"><h2>Escolher do Flow</h2><p class="empty">Mídias que já estão no projeto aberto do Flow.</p><div class="lib" id="pickList"></div><div style="margin-top:16px"><button class="btn small ghost" onclick="picker.close()">Fechar</button></div></dialog>
 <dialog id="viewer"><div class="viewbar"><button type="button" class="btn small danger" id="viewerTrash">Mover para <span data-place="bin">a lixeira do Mac</span></button><button type="button" class="btn small" onclick="viewer.close()" autofocus>Fechar</button></div><div id="viewerBody"></div><p class="empty" id="viewerPath"></p></dialog>
 <input type="file" id="file" hidden>
@@ -1266,14 +1275,14 @@ $("#jobs").addEventListener("click", async (e) => {
 });
 function renderStatus(st) {
   const f = st.flow, active = st.jobs.some((j) => j.status === "running" || j.status === "queued");
-  busy = false;
+  busy = false; queueActive = active;
   const cls = !f.signedIn || !f.inProject ? "down" : active ? "rolling" : "ready";
   const text = !f.signedIn ? "Sem login" : !f.inProject ? "Nenhum projeto aberto" : active ? "Trabalhando" : "Pronto";
   if (f.credits_remaining !== undefined) renderStatus.credits = f.credits_remaining;
   if (f.plan) renderStatus.plan = f.plan;
   $("#status").innerHTML = `<span class="pill"><i class="tally ${cls}"></i>${text}</span>${renderStatus.plan ? `<span class="pill">${esc(renderStatus.plan)}</span>` : ""}${renderStatus.credits !== undefined ? `<span class="pill">${renderStatus.credits.toLocaleString("pt-BR")} créditos</span>` : ""}`;
   $("#hint").innerHTML = f.hint ? `<div class="hint">${esc(f.hint)}</div>` : "";
-  if (f.url) $("#crumb").textContent = f.inProject ? "Projeto aberto no Flow" : "Flow sem projeto aberto";
+  if (f.url) { curUrl = f.url; $("#whereName").textContent = whereLabel(f.inProject); }
   $("#pacing").innerHTML = st.pacing ? `<div class="pacing">⏱ ${esc(st.pacing)}</div>` : "";
   const jobs = [...st.jobs].reverse();
   const sig = JSON.stringify(jobs.map((j) => [j.id, j.status, j.progress, j.files.length, j.credits, j.attempts, j.failed_scenes?.length ?? 0]));
@@ -1302,6 +1311,40 @@ function renderStatus(st) {
   estimate();
   return active;
 }
+/* ---------- conta e projeto ---------- */
+let ACCTS = null, curUrl = "", queueActive = false;
+const curIds = () => { const m = curUrl.match(/\/u\/(\d+)\/project\/([0-9a-f-]{36})/) ?? curUrl.match(/()\/project\/([0-9a-f-]{36})/); return m ? { u: Number(m[1] || 0), id: m[2] } : null; };
+function whereLabel(inProject = true) {
+  if (!inProject) return "Nenhum projeto aberto";
+  const c = curIds(); if (!c) return "Projeto aberto no Flow";
+  const acc = ACCTS?.find((a) => a.projects.some((p) => p.id === c.id)) ?? ACCTS?.find((a) => a.index === c.u);
+  const proj = acc?.projects.find((p) => p.id === c.id);
+  return acc ? `${acc.email.split("@")[0]} · ${proj?.title ?? "projeto aberto"}` : `Conta ${c.u + 1} · projeto aberto`;
+}
+function renderAccts() {
+  const c = curIds();
+  $("#acctList").innerHTML = (ACCTS ?? []).map((a) => `<div class="acct"><h4>${esc(a.email)}<small>${esc(a.name)}</small></h4><div class="lib">${a.projects.map((p) => `<button type="button" data-open="${esc(p.url)}" class="${c?.id === p.id ? "cur" : ""}"><span>${esc(p.title || "Sem nome")}</span><em>${c?.id === p.id ? "aberto" : "abrir"}</em></button>`).join("") || `<p class="empty">Nenhum projeto nesta conta.</p>`}</div></div>`).join("") || `<p class="empty">Nenhuma conta encontrada no Chrome do Flow.</p>`;
+}
+async function loadAccts(show) {
+  if (!LIVE) return;
+  if (show) $("#acctList").innerHTML = `<p class="empty">Lendo as contas do Flow… (abre uma aba rápida no Chrome do Flow)</p>`;
+  try { ACCTS = await api("accounts"); renderAccts(); $("#whereName").textContent = whereLabel(); }
+  catch (err) { if (show) $("#acctList").innerHTML = `<p class="empty" style="color:var(--bad)">${esc(err.message)}</p>`; }
+}
+$("#where").onclick = () => { if (!guard()) return; acctDlg.showModal(); if (ACCTS) renderAccts(); else loadAccts(true); };
+$("#acctReload").onclick = () => loadAccts(true);
+$("#acctList").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-open]"); if (!b || b.classList.contains("cur")) return;
+  if (queueActive) return toast("Espere a fila terminar antes de trocar de projeto.", true);
+  b.disabled = true; b.querySelector("em").textContent = "abrindo…";
+  try {
+    const st = await api("open_project", { url: b.dataset.open });
+    curUrl = st.url ?? b.dataset.open; renderAccts(); $("#whereName").textContent = whereLabel();
+    toast("Projeto trocado. As próximas gerações vão para lá.");
+    acctDlg.close(); LIB = []; loadCast().then((c) => { CAST = c; renderCast(); }).catch(() => {}); poll(true);
+  } catch (err) { toast(err.message, true); b.disabled = false; b.querySelector("em").textContent = "abrir"; }
+});
+
 let timer, wasActive = false;
 async function poll(detailed = false) {
   clearTimeout(timer);
@@ -1342,7 +1385,7 @@ for (const [id, path] of [["f_collection", "frames"], ["s_collection", "shots"]]
   try { [TECH, VOICES] = await Promise.all([api("techniques"), api("voices")]); } catch { VOICES = { kokoro: [], gemini: [] }; }
   applyPlace(VOICES.place);
   loadCast().then((c) => { CAST = c; renderCast(); }).catch(() => {});
-  renderAll(); showTab(hashTab() ?? S.tab); poll(true); loadGallery();
+  renderAll(); showTab(hashTab() ?? S.tab); poll(true); loadGallery(); setTimeout(() => loadAccts(false), 4000);
 })();
 </script>
 </body>

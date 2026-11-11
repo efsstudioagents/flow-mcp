@@ -250,6 +250,28 @@ server.registerTool(
 );
 
 server.registerTool(
+  "flow_accounts",
+  {
+    title: "List Flow accounts and projects",
+    description: "Every Google account signed in to the Flow window, with its Flow projects (title and address). Use with flow_open_project to generate in another account or project.",
+    inputSchema: shapes.accounts,
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  (args) => reply(patient("flow_accounts", core.accounts(args))),
+);
+
+server.registerTool(
+  "flow_open_project",
+  {
+    title: "Switch the Flow account and project",
+    description: "Open another Flow project in the Flow window, in whichever signed-in account owns it (address from flow_accounts). Every later generation goes there. Characters belong to a project.",
+    inputSchema: shapes.open_project,
+    annotations: { openWorldHint: true },
+  },
+  (args) => reply(patient("flow_open_project", core.open_project(args))),
+);
+
+server.registerTool(
   "flow_new_project",
   {
     title: "Start a new Flow project",
