@@ -5,7 +5,7 @@ import { z } from "zod";
 import { assemble, localVoices, speakLocally } from "./assemble.js";
 import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemini.js";
 import { extractLastFrame } from "./chain.js";
-import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { characterLook, collectAssets, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job } from "./queue.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -137,6 +137,16 @@ export const shapes = {
       .describe("Skip the guard that refuses to run when Flow already holds a fresh-looking continuation of this clip. Only pass it when you have checked the grid and genuinely want another paid take."),
   },
   trash: { name: z.string().min(1).describe("Exact title of the item to move to Flow's Trash, as listed by flow_assets.") },
+  collect: {
+    collection: z
+      .string()
+      .min(1)
+      .describe('Collection to move the items into. Use "/" for nesting, e.g. "Cenários/Fazenda"; missing levels are created and nested.'),
+    items: z
+      .array(z.object({ name: z.string().min(1).describe("Exact title in All media, as listed by flow_assets."), rename_to: z.string().min(1).optional().describe("New title to give it before moving.") }))
+      .min(1)
+      .max(100),
+  },
   set_key: { key: z.string().min(1).max(200) },
   discard: { path: z.string().min(1).describe("A saved film, still, narration or whole project folder inside the films folder, to move to this computer's bin (Mac Trash, Windows Recycle Bin).") },
   outputs: {},
@@ -213,6 +223,7 @@ export interface Core {
   character_edit(a: Args<"character_edit">): Promise<unknown>;
   edit(a: Args<"edit">): Promise<unknown>;
   trash(a: Args<"trash">): Promise<unknown>;
+  collect(a: Args<"collect">): Promise<unknown>;
   discard(a: Args<"discard">): Promise<unknown>;
   set_key(a: Args<"set_key">): Promise<unknown>;
   continue_shot(a: Args<"continue_shot">): Promise<unknown>;
@@ -295,7 +306,9 @@ export class LocalCore implements Core {
             .join("")}`
         : "";
       const inherit = reference_previous
-        ? " Match the previous image exactly for the subject's appearance, colour palette, lighting and rendering style; this is the same scene a moment later."
+        // "Same scene a moment later" made the model copy the previous framing, so a set of room angles came back as
+        // near-duplicates. Keep the look, let the prompt decide where the camera is.
+        ? " Keep the same subject, place, colour palette, lighting and rendering style as the previous image. The camera position and framing follow this prompt, not the previous image."
         : "";
       jobs.push(
         this.queue.add({
@@ -460,6 +473,11 @@ export class LocalCore implements Core {
   async trash({ name }: Args<"trash">) {
     if (this.queue.busy) throw new Error(BUSY);
     return trashAsset(name);
+  }
+
+  async collect({ collection, items }: Args<"collect">) {
+    if (this.queue.busy) throw new Error(BUSY);
+    return collectAssets(collection, items);
   }
 
   async character(a: Args<"character">) {

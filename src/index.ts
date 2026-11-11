@@ -202,6 +202,18 @@ server.registerTool(
 );
 
 server.registerTool(
+  "flow_collection",
+  {
+    title: "Organise items into a Flow collection",
+    description:
+      'Move images or videos from the project\'s All media grid into a collection (Flow\'s folders in the sidebar Library), optionally renaming each first. Nested paths like "Cenários/Fazenda" are created and nested when missing. Flow MOVES the item: it leaves All media and lives in the collection. Only items still loose in All media can be moved this way. Waits for the generation queue to be idle. Returns what moved, what was not found and what failed.',
+    inputSchema: shapes.collect,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  (args) => reply(patient("flow_collection", core.collect(args))),
+);
+
+server.registerTool(
   "flow_trash",
   {
     title: "Move an item to Flow's Trash",

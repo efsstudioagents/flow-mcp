@@ -1,8 +1,9 @@
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
+import { createHash } from "node:crypto";
 import type { Locator, Page } from "playwright-core";
-import { HOME_DIR, getFlowPage } from "./chrome.js";
+import { HOME_DIR, getFlowPage, withEnglishUi } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { extractZip } from "./platform.js";
 
@@ -80,6 +81,20 @@ const TILE_ID_JS = `(tile) => {
 export async function mediaIds(page: Page): Promise<string[]> {
   return page.evaluate(
     (js) => [...document.querySelectorAll("flow-grid-tile-container")].map(eval(js)).filter(Boolean) as string[],
+    TILE_ID_JS,
+  );
+}
+
+// Only tiles that actually hold a finished image or video. A blocked generation leaves a <flow-error-tile> that still
+// carries the prompt as its title, so mediaIds() lists it too: counting it as "new media" made the runner try to
+// download a failed tile ("menu has no Download, offered Delete") instead of retrying it, which looked like a loop.
+async function finishedMediaIds(page: Page): Promise<string[]> {
+  return page.evaluate(
+    (js) =>
+      [...document.querySelectorAll("flow-grid-tile-container")]
+        .filter((t) => !t.querySelector("flow-error-tile") && t.querySelector("img[src], video[src]"))
+        .map(eval(js))
+        .filter(Boolean) as string[],
     TILE_ID_JS,
   );
 }
@@ -194,7 +209,7 @@ async function waitForNewMedia(page: Page, before: string[], count: number, time
   let failures = 0;
   while (Date.now() < deadline) {
     await pause(page, 2000);
-    const fresh = [...new Set((await mediaIds(page)).filter((id) => !before.includes(id)))];
+    const fresh = [...new Set((await finishedMediaIds(page)).filter((id) => !before.includes(id)))];
     // New tiles are listed first, so anything beyond the requested count is not ours.
     if (fresh.length >= count) return fresh.slice(0, count);
     const progress = await page.evaluate(() =>
@@ -266,7 +281,7 @@ async function applySettings(page: Page, job: Job): Promise<number> {
   if (s.type === "video" && s.duration) await pickRadio(page, `${s.duration}s`);
   await pickRadio(page, `x${s.variants ?? 1}`);
   await pause(page, 600);
-  const costText = await page.getByRole("link", { name: /credits?$/ }).innerText();
+  const costText = await page.getByRole("link", { name: /\d[\d.,]*\s*credits?$/i }).first().innerText();
   const cost = Number(costText.match(/\d+/)?.[0] ?? NaN);
   await page.keyboard.press("Escape");
   await pause(page, 400);
@@ -281,7 +296,7 @@ const ASSET_PREFIX = "asset:";
 async function uploadAsset(page: Page, job: Job, file: string, label: string): Promise<string> {
   if (file.startsWith(ASSET_PREFIX)) return file.slice(ASSET_PREFIX.length).trim();
   if (!existsSync(file)) throw new Error(`File not found: ${file}`);
-  const name = `fm-${job.id}-${label}${extname(file).toLowerCase()}`;
+  const name = uploadName(file, job, label);
   const staged = join(mkdtempSync(join(tmpdir(), "flow-mcp-")), name);
   copyFileSync(file, staged);
   await scrollToTop(page);
@@ -294,11 +309,40 @@ async function uploadAsset(page: Page, job: Job, file: string, label: string): P
   return name;
 }
 
+// Reference images are named after their content, so the same file always gets the same name in Flow. Naming them
+// per job re-uploaded identical references on every scene and every retry, and filled the grid with copies.
+function uploadName(file: string, job: Job, label: string): string {
+  if (!label.startsWith("ref")) return `fm-${job.id}-${label}${extname(file).toLowerCase()}`;
+  const hash = createHash("sha1").update(readFileSync(file)).digest("hex").slice(0, 12);
+  return `fm-ref-${hash}${extname(file).toLowerCase()}`;
+}
+
+// Attaches a reference image, reusing the copy already in the project when there is one.
+async function attachReference(page: Page, job: Job, ref: string, label: string): Promise<void> {
+  const opener = page.getByRole("button", { name: "Add ingredients to the prompt box" });
+  if (!ref.startsWith(ASSET_PREFIX) && existsSync(ref)) {
+    const existing = uploadName(ref, job, label);
+    try {
+      await attachAsset(page, opener, existing.replace(/\.[^.]+$/, ""));
+      return;
+    } catch {
+      await page.keyboard.press("Escape").catch(() => {});
+      await pause(page, 500);
+    }
+  }
+  await attachAsset(page, opener, await uploadAsset(page, job, ref, label));
+}
+
 const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // Options read "<name>", "<name> Image|Video|Avatar" or "<voice> <description>", so match on the leading name.
-const optionByName = (list: Locator, name: string) =>
-  list.getByRole("option", { name: new RegExp(`^${escapeRe(name)}`, "i") }).first();
+// An exact name wins over a longer one that merely starts with it: "Bella" must pick the character, not the
+// voice "Bella Goiana". The prefix match stays as the fallback for names Flow shortens with an ellipsis.
+async function optionByName(list: Locator, name: string): Promise<Locator> {
+  const exact = list.getByRole("option", { name: new RegExp(`^${escapeRe(name)}(\\s+(Image|Video|Avatar|Character))?$`, "i") });
+  if ((await exact.count().catch(() => 0)) > 0) return exact.first();
+  return list.getByRole("option", { name: new RegExp(`^${escapeRe(name)}`, "i") }).first();
+}
 
 // The frame pickers attach on click; the ingredients picker only previews and needs "Add to prompt".
 // Option names are "<asset name>" or "<asset name> Image|Video", so match on the prefix.
@@ -306,7 +350,7 @@ async function attachAsset(page: Page, opener: Locator, assetName: string): Prom
   await opener.click();
   const list = page.getByRole("listbox", { name: "Asset list" });
   await list.waitFor({ state: "visible", timeout: 10_000 });
-  let option = optionByName(list, assetName);
+  let option = await optionByName(list, assetName);
   // Voices, characters and avatars live behind their own tabs, so look there when "All" does not have it.
   if (!(await option.isVisible().catch(() => false))) {
     for (const tab of ["Voices", "Characters", "Avatars", "Uploads"]) {
@@ -314,7 +358,7 @@ async function attachAsset(page: Page, opener: Locator, assetName: string): Prom
       if (!(await t.isVisible().catch(() => false))) continue;
       await t.click();
       await pause(page, 1200);
-      option = optionByName(list, assetName);
+      option = await optionByName(list, assetName);
       if (await option.isVisible().catch(() => false)) break;
     }
   }
@@ -512,7 +556,8 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
       const more = tile.getByRole("button", { name: "More options" });
       if (await more.isVisible({ timeout: 3000 }).catch(() => false)) await more.click();
       else await tile.click({ button: "right" });
-      const download = page.getByRole("menuitem", { name: "Download", exact: true });
+      // Flow's UI language decides the label: "Download" in English, "Transferir" in Portuguese.
+      const download = page.getByRole("menuitem", { name: /^(Download|Transferir)$/ });
       if (!(await download.isVisible({ timeout: 8000 }).catch(() => false))) {
         // Saying what Flow actually offered turns "locator timed out" into something that explains itself next time.
         const items = await page.locator('[role="menuitem"]').evaluateAll((ms) => ms.map((m) => (m.textContent ?? "").replace(/\s+/g, " ").trim()));
@@ -550,9 +595,11 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
 
 async function ensureProjectGrid(page: Page): Promise<void> {
   await dismissOverlays(page);
-  const root = page.url().match(/^https:\/\/[^/]+\/project\/[0-9a-f-]{36}/)?.[0];
-  if (root && page.url() !== root) {
-    await page.goto(root, { waitUntil: "domcontentloaded" });
+  // `/u/1/` is a second Google account signed in to the same profile; keep it, or Flow opens the default account.
+  const root = page.url().match(/^https:\/\/[^/]+(?:\/u\/\d+)?\/project\/[0-9a-f-]{36}/)?.[0];
+  const target = root ? withEnglishUi(root) : undefined;
+  if (target && page.url() !== target) {
+    await page.goto(target, { waitUntil: "domcontentloaded" });
     await pause(page, 2500);
   }
   await page.getByRole("navigation", { name: "Project navigation" }).getByText("All media", { exact: true }).click().catch(() => {});
@@ -595,10 +642,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
       .join(" · ");
     s.reference_images = [];
   }
-  for (const [i, ref] of (s.reference_images ?? []).entries()) {
-    const name = await uploadAsset(page, job, ref, `ref${i + 1}`);
-    await attachAsset(page, page.getByRole("button", { name: "Add ingredients to the prompt box" }), name);
-  }
+  for (const [i, ref] of (s.reference_images ?? []).entries()) await attachReference(page, job, ref, `ref${i + 1}`);
   const wanted = (s.reference_images ?? []).length;
   if (wanted) {
     const attached = await page.getByRole("button", { name: "Ingredient" }).count();
@@ -623,11 +667,14 @@ export async function runGeneration(job: Job): Promise<string[]> {
     // Flow names clips itself and reuses those names, so two takes of one scene come back identically titled and
     // neither can be found by name afterwards. Renaming each finished tile to the scene's own file stem makes every
     // later lookup - download, continue, assemble - unambiguous. Best effort: a failed rename must not lose the clip.
-    const renamed = await renameTile(page, mediaTile(page, id), `${basename(s.output_dir)}-${label}`).catch(() => false);
-    if (renamed) job.note = [job.note, `renamed in Flow to ${basename(s.output_dir)}-${label}`].filter(Boolean).join(" · ");
+    const newTitle = `${basename(s.output_dir)}-${label}`;
+    const renamed = await renameTile(page, mediaTile(page, id), newTitle).catch(() => false);
+    if (renamed) job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
     await pause(page, 800);
     const stem = join(s.output_dir, label);
-    files.push(...(await downloadMedia(page, id, stem, s.download_quality)));
+    // A tile known only by its title (no media id yet) must now be found by the new title, or the download times out.
+    const tileId = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
+    files.push(...(await downloadMedia(page, tileId, stem, s.download_quality)));
     await pause(page, 1500);
   }
   return files;
@@ -843,6 +890,127 @@ export async function trashAsset(name: string): Promise<{ trashed: string }> {
   return { trashed: name };
 }
 
+// ---------------------------------------------------------------------------------------------- collections
+// Mapped live on 2026-11-11. The sidebar "Library" lists the project's collections; its "+" ("Create collection")
+// adds "Untitled collection" at the top level with a "Rename item" textbox already focused. There is no "add to
+// collection" in a tile's menu: an item is MOVED into a collection by dragging its tile onto the collection's name in
+// the sidebar (Flow shows "Add to collection"), and it then leaves the All media grid. Dragging a collection's sidebar
+// row onto another row nests it (that is how "Roça" holds "Dump 1..3"). A nested row is hidden until its parent's
+// "Expand <name>" button is pressed, and the sidebar can shift while a drag hovers it - one fast drag dropped items
+// on the neighbouring collection - so every drop re-reads the target's position just before letting go.
+
+async function sidebarRow(page: Page, name: string): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  for (let pass = 0; pass < 3; pass++) {
+    const rows = page.getByText(name, { exact: true });
+    for (let i = 0; i < (await rows.count()); i++) {
+      const box = await rows.nth(i).boundingBox();
+      if (box && box.x < 480 && box.width > 0) return box;
+    }
+    // Not visible: open every collapsed parent and look again.
+    const expanders = page.getByRole("button", { name: /^Expand / });
+    const n = await expanders.count();
+    if (!n) break;
+    for (let i = 0; i < n; i++) await expanders.nth(i).click().catch(() => {});
+    await pause(page, 800);
+  }
+  return null;
+}
+
+async function dropOnSidebar(page: Page, from: { x: number; y: number; width: number; height: number }, target: string): Promise<void> {
+  if (!(await sidebarRow(page, target))) throw new Error(`Collection "${target}" is not in the sidebar.`);
+  const sx = from.x + from.width / 2;
+  const sy = from.y + from.height / 2;
+  await page.mouse.move(sx, sy);
+  await page.mouse.down();
+  await page.mouse.move(sx - 40, sy, { steps: 5 });
+  await page.mouse.move(600, sy, { steps: 10 });
+  await pause(page, 400);
+  let box = await sidebarRow(page, target);
+  if (!box) { await page.mouse.up(); throw new Error(`Lost "${target}" in the sidebar while dragging.`); }
+  await page.mouse.move(box.x + 40, box.y + box.height / 2, { steps: 15 });
+  await pause(page, 700);
+  box = (await sidebarRow(page, target)) ?? box;
+  await page.mouse.move(box.x + 40, box.y + box.height / 2, { steps: 3 });
+  await pause(page, 500);
+  await page.mouse.up();
+  await pause(page, 1800);
+}
+
+// Makes sure each level of "Parent/Child" exists, creating and nesting what is missing. Names are matched exactly
+// and must be unique in the sidebar.
+async function ensureCollectionPath(page: Page, path: string): Promise<string> {
+  const levels = path.split("/").map((s) => s.trim()).filter(Boolean);
+  if (!levels.length) throw new Error("Give a collection name, e.g. \"Cenários/Fazenda\".");
+  let parent: string | undefined;
+  for (const name of levels) {
+    if (!(await sidebarRow(page, name))) {
+      await page.getByRole("button", { name: "Create collection" }).click();
+      const box = page.getByRole("textbox", { name: "Rename item" });
+      await box.waitFor({ timeout: 8000 });
+      await box.fill(name);
+      await box.press("Enter");
+      await pause(page, 1500);
+      const row = await sidebarRow(page, name);
+      if (!row) throw new Error(`Flow did not create the collection "${name}".`);
+      if (parent) await dropOnSidebar(page, row, parent);
+    }
+    parent = name;
+  }
+  return levels[levels.length - 1];
+}
+
+export async function nestCollection(child: string, parent: string): Promise<string> {
+  const state = await getFlowState();
+  if (!state.signedIn || !state.inProject) throw new Error(state.hint);
+  const page = await getFlowPage();
+  await ensureProjectGrid(page);
+  const row = await sidebarRow(page, child);
+  if (!row) throw new Error(`Collection "${child}" is not in the sidebar.`);
+  if (!(await sidebarRow(page, parent))) throw new Error(`Collection "${parent}" is not in the sidebar.`);
+  await dropOnSidebar(page, row, parent);
+  return `${child} -> ${parent}`;
+}
+
+export async function collectAssets(
+  collection: string,
+  items: { name: string; rename_to?: string }[],
+): Promise<{ collection: string; moved: string[]; not_found: string[]; failed: { name: string; error: string }[] }> {
+  const state = await getFlowState();
+  if (!state.signedIn || !state.inProject) throw new Error(state.hint);
+  const page = await getFlowPage();
+  await ensureProjectGrid(page);
+  const leaf = await ensureCollectionPath(page, collection);
+  const moved: string[] = [];
+  const notFound: string[] = [];
+  const failed: { name: string; error: string }[] = [];
+  for (const item of items) {
+    try {
+      await ensureProjectGrid(page);
+      const found = (await scanGrid(page, (seen) => seen.some((a) => a.name === item.name))).find((a) => a.name === item.name);
+      if (!found) { notFound.push(item.name); continue; }
+      let title = item.name;
+      let tile = tileOf(page, found);
+      if (item.rename_to && item.rename_to !== item.name) {
+        if (!(await renameTile(page, tile, item.rename_to))) throw new Error("rename failed");
+        title = item.rename_to;
+        await scanGrid(page, (seen) => seen.some((a) => a.name === title));
+        tile = tileOf(page, { ...found, name: title });
+      }
+      await tile.scrollIntoViewIfNeeded();
+      const box = await tile.boundingBox();
+      if (!box) throw new Error("tile not on screen");
+      await dropOnSidebar(page, box, leaf);
+      if (await tile.count()) throw new Error("still in All media after the drop");
+      moved.push(title);
+    } catch (e) {
+      failed.push({ name: item.name, error: e instanceof Error ? e.message : String(e) });
+      await page.keyboard.press("Escape").catch(() => {});
+    }
+  }
+  await scrollToTop(page);
+  return { collection, moved, not_found: notFound, failed };
+}
+
 // A scene's tile menu downloads a ZIP of its loose clips, which is not what anyone wants. The whole scene comes out as
 // ONE stitched file from inside the scene view: open the scene, press "Download scene", and Flow shows "Exporting your
 // scene..." before the file arrives (a 29 s scene took a few seconds). The user showed this route; verified 2026-10-01.
@@ -937,11 +1105,11 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
     await page.getByRole("button", { name: "Add from project", exact: true }).click();
     const list = page.getByRole("listbox", { name: "Asset list" });
     await list.waitFor({ state: "visible", timeout: 10_000 });
-    let option = optionByName(list, title);
+    let option = await optionByName(list, title);
     if (!(await option.isVisible().catch(() => false))) {
       await page.getByRole("tab", { name: "Uploads" }).click();
       await pause(page, 1000);
-      option = optionByName(list, title);
+      option = await optionByName(list, title);
     }
     if (!(await option.isVisible().catch(() => false))) {
       await page.keyboard.press("Escape");
@@ -968,7 +1136,7 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
     await page.getByRole("button", { name: "Select a voice" }).click();
     const voices = page.getByRole("listbox", { name: "Asset list" });
     await voices.waitFor({ state: "visible", timeout: 10_000 });
-    const option = optionByName(voices, c.voice);
+    const option = await optionByName(voices, c.voice);
     if (!(await option.isVisible().catch(() => false))) {
       const available = (await voices.getByRole("option").allInnerTexts()).map((t) => t.split("\n").filter((l) => l && l !== "voice_selection").join(" - "));
       await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();

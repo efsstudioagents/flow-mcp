@@ -4,8 +4,16 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 
-export const FLOW_URL = "https://flow.google.com/";
+export const FLOW_URL = "https://flow.google.com/?hl=en";
 const FLOW_HOSTS = /^https:\/\/(flow\.google\.com|labs\.google\/fx)/;
+
+// The driver finds buttons by their English names ("Agent", "Download"...). Flow follows the Google account's
+// language, so a Portuguese account breaks every locator. `hl=en` forces the English UI for that page load.
+export function withEnglishUi(url: string): string {
+  const u = new URL(url);
+  u.searchParams.set("hl", "en");
+  return u.toString();
+}
 export const HOME_DIR = process.env.FLOW_MCP_HOME ?? join(homedir(), ".flow-mcp");
 export const PROFILE_DIR = join(HOME_DIR, "chrome-profile");
 export const CDP_PORT = Number(process.env.FLOW_MCP_CDP_PORT ?? 9333);
@@ -47,6 +55,7 @@ async function launchChrome(): Promise<void> {
       `--remote-debugging-port=${CDP_PORT}`,
       "--no-first-run",
       "--no-default-browser-check",
+      "--lang=en-US",
       FLOW_URL,
     ],
     { detached: true, stdio: "ignore" },
