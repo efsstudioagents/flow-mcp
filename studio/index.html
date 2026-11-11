@@ -186,6 +186,7 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg) saturate(.6)
 .side section+section{margin-top:26px}
 .sidehead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px}
 .sidehead .count{font:600 12px var(--mono);color:var(--dim)}
+.monbar{display:flex;justify-content:flex-end;margin:-4px 0 10px}.monbar:has(button[hidden]){display:none}
 .pacing{font:600 13px var(--mono);color:var(--warn);margin-bottom:10px;padding:8px 10px;border:1px dashed rgba(255,200,74,.35);border-radius:var(--r-sm)}
 #jobs{display:flex;flex-direction:column;gap:8px}
 .job{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel);animation:rise .3s both}
@@ -519,6 +520,7 @@ dialog h2{font-size:34px}
   <aside class="side">
     <section>
       <div class="sidehead"><h2>Monitor</h2><span class="count" id="jobCount"></span></div>
+      <div class="monbar"><button type="button" class="btn small ghost" id="clearJobs" hidden title="Tira da lista os jobs cancelados e os que deram erro. Os arquivos salvos continuam no Mac.">Limpar cancelados e com erro</button></div>
       <div id="pacing"></div>
       <div id="jobs"><p class="empty">Nada na fila.</p></div>
     </section>
@@ -1273,6 +1275,10 @@ $("#jobs").addEventListener("click", async (e) => {
   try { if (r) await api("retry", { job_ids: [r.dataset.retry] }); if (c) await api("cancel", { job_id: c.dataset.cancel }); if (r || c) poll(); }
   catch (err) { toast(err.message, true); }
 });
+$("#clearJobs").addEventListener("click", async () => {
+  try { const r = await api("clear", {}); toast(`${r.removed} job(s) tirado(s) da lista.`); poll(); }
+  catch (err) { toast(err.message, true); }
+});
 function renderStatus(st) {
   const f = st.flow, active = st.jobs.some((j) => j.status === "running" || j.status === "queued");
   busy = false; queueActive = active;
@@ -1298,6 +1304,7 @@ function renderStatus(st) {
       const pic = /\.(mp4|webm|mov)$/i.test(f) ? `<video muted playsinline preload="metadata" src="${media(f)}#t=0.5"></video>` : /\.(m4a|mp3|wav)$/i.test(f) ? `<span style="font:400 26px var(--serif);color:var(--amber)">♪</span>` : `<img loading="lazy" src="${media(f)}">`;
       return `<div class="jthumb" data-view="${esc(f)}" title="Abrir">${pic}${more}</div>`;
     };
+    $("#clearJobs").hidden = !jobs.some((j) => /failed|cancelled/.test(j.status));
     $("#jobCount").textContent = jobs.length ? `${jobs.filter((j) => /queued|running/.test(j.status)).length} ativos · ${jobs.length} no total` : "";
     $("#jobs").innerHTML = jobs.map((j) => `<article class="job ${j.status}">${thumb(j)}<div class="jbody">
       <div class="jtop"><span class="name" title="${esc(j.project)}">${esc((j.project || "").split(/[\\/]/).pop())} · ${esc(j.scene)}</span>

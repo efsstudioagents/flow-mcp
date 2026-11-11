@@ -134,6 +134,7 @@ export const shapes = {
     timeout_seconds: z.number().int().min(5).max(900).default(40).describe("An MCP call returns after at most 40 s whatever this says, so call again until finished is true."),
   },
   cancel: { job_id: z.string() },
+  clear: { statuses: z.array(z.enum(["cancelled", "failed", "done"])).optional().describe("Which finished jobs to drop from the list. Default: cancelled and failed.") },
   retry: { job_ids: z.array(z.string()).optional().describe("Jobs to re-queue. Default: every failed job.") },
   assets: { kind: z.enum(["image", "video", "scene"]).optional() },
   download: {
@@ -450,6 +451,7 @@ export interface Core {
   generate(a: Args<"generate">): Promise<unknown>;
   wait(a: Args<"wait">): Promise<unknown>;
   cancel(a: Args<"cancel">): Promise<unknown>;
+  clear(a: Args<"clear">): Promise<unknown>;
   retry(a: Args<"retry">): Promise<unknown>;
   assets(a: Args<"assets">): Promise<unknown>;
   download(a: Args<"download">): Promise<unknown>;
@@ -608,6 +610,11 @@ export class LocalCore implements Core {
     const job = this.queue.cancel(job_id);
     if (!job) throw new Error(`No job with id ${job_id}. Use flow_status to list jobs.`);
     return jobView(job);
+  }
+
+  async clear({ statuses }: Args<"clear">) {
+    const removed = this.queue.clear(statuses ?? ["cancelled", "failed"]);
+    return { removed: removed.length, remaining: this.queue.list().length };
   }
 
   async retry({ job_ids }: Args<"retry">) {

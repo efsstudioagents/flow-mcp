@@ -96,6 +96,13 @@ export class JobQueue {
     return [...this.jobs.values()];
   }
 
+  // Drops cancelled and failed jobs from the list (the Monitor's "Limpar" button). Files already saved stay on disk.
+  clear(statuses: JobStatus[] = ["cancelled", "failed"]): Job[] {
+    const removed = this.list().filter((j) => statuses.includes(j.status));
+    for (const j of removed) this.jobs.delete(j.id);
+    return removed;
+  }
+
   // Puts a failed or cancelled job back in line with the same settings and file name.
   retry(id: string): Job | undefined {
     const job = this.jobs.get(id);
