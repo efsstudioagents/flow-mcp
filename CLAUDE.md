@@ -244,6 +244,25 @@ The preview tool could not read the project while it lived in ~/Desktop; check t
   newer clip could not be found by name and flow_assets looked unchanged. runGeneration now renames each finished
   tile to `<project>-<file_stem>` through the tile menu's `Rename` (renameTile, best effort - a failed rename must
   never lose the clip). The user asked for this; it removes a whole class of confusion.
+- FALSE "FAILED" CLIPS (2026-10-09, 31 in one session, every clip that used first/last frames): the job grabbed its
+  OWN UPLOAD instead of the clip. Frames and reference files are uploaded as `fm-<job>-<label>`; the upload tile
+  appears at once ("image 0%") and only gets its media id when processing ends, which was after the "before"
+  snapshot, so it looked new. Its menu offers only Delete, hence "tile menu has no Download item. It offered: Delete",
+  while the real clip sat finished in the grid (flow_download by title always worked). Now: freshMedia() skips
+  `fm-` tiles, tiles still showing "NN%", and tiles of the wrong kind (a video job only accepts flow-video-tile, an
+  image job flow-image-tile; edit and continue jobs accept videos only, so "Save frame" stills are ignored too), and
+  uploadAsset waits for its own tile by name until it carries data-media-id. Replayed against the live grid: the old
+  logic picked fm-db88e712-end.png, the new one waits and then picks the clip. Then verified on a paid clip (4 credits,
+  the user's OK): Omni 1.1 Flash 4 s 360p from an uploaded first frame -> job "done" in 63 s, the clip downloaded,
+  opening on the frame, progress readout working ("14%").
+- SECOND REFERENCE (2026-10-09, twice: a character, then an uploaded still): the click on "Add ingredients" produced
+  no picker at all and the job died after 10 s. Not reproducible on demand (character + upload, even mid-processing,
+  all opened fine), so attachAsset now retries the opener three times with Escape in between, and always switches
+  the picker to its All tab (it reopens on the last tab used, e.g. Characters). Verified with a real free still:
+  "asset:Juno" + an uploaded file -> both attached, the generated still (not the upload) downloaded.
+  Also noted: getByRole("button", { name: "Ingredient" }) also counts a hidden button outside the composer.
+- listAssets/downloadAsset now go to the project grid first: with a scene (or clip/character) view open, the scan
+  found nothing and flow_assets reported "no scenes" while one was on screen.
 - Gemini TTS: a LONG `style` note makes the model ramble - a 45-word line with a 25-word delivery note produced 674
   SECONDS of audio. The same line with no style note is 20.5 s, with a short note 32 s. Keep style notes to a few
   words, and sanity-check the returned duration against the expected one before using it.
@@ -283,6 +302,10 @@ The preview tool could not read the project while it lived in ~/Desktop; check t
   key passes a format check AND Google accepts it (models list, key in a header, no TTS quota), so a bad paste can
   never replace a working key. set_key is deliberately NOT an MCP tool - a key typed into the panel never reaches
   Claude. Tested only on the rejection path, so the user's real key was never overwritten.
+- Key format (2026-10-13): new Google AI Studio keys start "AQ" instead of "AIza", and saveGeminiKey's prefix check
+  (^AIza...) refused them in the panel. It now checks only the shape (20-512 key characters, no spaces, no template
+  text) and leaves validity to Google's own models-list check. Both requests send the key in the x-goog-api-key header,
+  which is format-agnostic. Privacy scans before a push must look for AQ-style keys as well as AIza ones.
 - CROSS-PLATFORM (2026-10-02): every OS difference lives in src/platform.ts - COMPUTER/BIN wording, moveToBin (Mac:
   rename into ~/.Trash; Windows: PowerShell Microsoft.VisualBasic ...SendToRecycleBin; Linux: `gio trash`, else
   ~/.local/share/Trash/files), extractZip (`tar` is bsdtar on macOS and Windows 10+ and reads ZIPs; `unzip` fallback),
@@ -322,3 +345,358 @@ The preview tool could not read the project while it lived in ~/Desktop; check t
   FLOW_MCP_PORT=8799 and FLOW_MCP_HOME=<scratch dir>. Never reuse the real home for that: a process that owns a port
   writes a fresh token to HOME/token, which locks every client of the real owner out (401). Symlink characters.json into
   the scratch home when looks must persist. Give the client a 60 s request timeout so the app's limit is reproduced.
+- FLOW IN ENGLISH (2026-10-13): every driver step finds a button by its ENGLISH accessible name (~45 labels), so a
+  Google account set to another language made the whole MCP fail. Measured on a spare tab: `?hl=es` turned every label
+  Spanish ("Inicio", "Menú para añadir contenido multimedia") on an English account, the choice holds through in-app
+  navigation (grid -> /edit/ -> back), a plain reload drops it, and a Spanish Accept-Language changes nothing (the
+  account's language wins over the browser's). So `?hl=en` overrides the account: launchChrome and getFlowPage load
+  `inEnglish(url)`, ensureProjectGrid compares paths (an address ending ?hl=en is already the grid) and reloads with
+  hl=en, and getFlowPage calls ensureEnglish, which reloads a non-English Flow page (`<html lang>`) and throws a clear
+  message if it stays foreign. Verified: the Flow tab put into Spanish, then a free still through a test MCP ->
+  switched to English, generated and downloaded (0 credits, 39 s).
+
+- COMPACT STUDIO (2026-10-13, the user found it "too big and bulky"): one density pass over the CSS, same look (stripe,
+  display font, orange tally, button styles). Floors kept on purpose: body and input text >= 16 px (iOS zooms into
+  smaller inputs; the global mobile-first rule), buttons and segments >= 38-46 px tall. Title on one line, 12 px
+  stripe, inputs 17 px with 10 px padding, labels 13 px, cards 14 px padding, headings 30 px, Roll bar 56 px. Pages
+  are 23-35% shorter on a phone. It also fixed a sideways scroll: at 390 px wide the old page was 427 px (checked with
+  a headless shot); every tab now fits at 375 px. Re-check with full-page headless shots per tab at 390 and 1440 wide
+  and an overflow scan (elements whose right edge passes the viewport, tabs row excluded).
+- GALLERY VIEWER (2026-10-13): Close and Move to Trash sat UNDER the media, and a tall clip (74vh) plus a wrapped path
+  pushed them off screen. They are now a bar on top, and every clip and still plays in one fixed black frame
+  (min(96dvh - 150px, 720px) tall, 960 px wide max, object-fit contain), so the viewer is the same size whatever is
+  open. Dialogs were also stuck in the top-left corner: the `*{margin:0}` reset kills <dialog>'s centring, so dialog
+  has margin:auto again. Close carries autofocus; showModal otherwise focused the red Trash button.
+- AGENT BATCHES + THE LEFT-HAND MENU (2026-10-13). An 11-image flow_agent_images run in another session failed at
+  once with "Could not switch Agent mode on" and made nothing. Flow was NOT redesigned (I first claimed it was; the
+  user corrected me): the left "Project navigation" (All media, Images, Videos, Characters, Scenes, Uploads, Tools,
+  Trash, Collapse) is where it always was. What was found, live:
+  1. ESCAPE SHUTS THE LEFT MENU. It is a Material drawer (mat-sidenav), and Escape closes it whenever the keyboard focus
+     is inside it. Clicking "All media" left the focus there, so the next dismissOverlays Escape shut the menu for the
+     rest of the session (the user's menu vanished; traced with DEBUG=pw:api plus a second connection watching the
+     menu). "All media" was then hidden and every later click on it waited out Playwright's 30 s default: a 3-image
+     agent batch took 6.4 min. leaveSideMenu() blurs the focus after each menu click and before every dismissOverlays
+     Escape. A page load restores the drawer to the saved state (localStorage flow-sidenav-collapsed, shared by every
+     project in that Chrome).
+  2. Collapse turns the menu into a strip of icons with no labels; getByText found nothing visible. clickProjectNav()
+     matches the button by its text, which holds icon name and label in both states; openProjectNav() reloads once if
+     the menu still is not showing. showAllMedia() falls back to the top bar's Filter menu (`Filtering and sorting
+     options`: tick boxes, `Clear all filters`, Sort by Newest/Oldest) only when the menu cannot be used.
+  3. The top bar also has a gear `Settings` ("View settings": Grid/Batch layout, tile size, toggles), so an unscoped
+     getByRole("button", { name: "Settings" }) matched it AND the agent's Settings: strict-mode error. Scoped to
+     `flow-base-prompt-box`.
+  4. Some menus ignore Escape (the agent panel's model menu did) and leave `cdk-overlay-backdrop settings-menu-backdrop`
+     over the page, swallowing every click, the Agent chip's included. dismissOverlays clicks showing backdrops away
+     (closes the menu, picks nothing); setAgentMode clears them and closes the agent settings panel (`flow-agent-panel`
+     -> `Back`; Escape does not close it, and while open it hides the Agent chip) before each try, and its error quotes
+     what intercepted the click. If agent mode still cannot be used, every scene goes the one-by-one route.
+  Progress names each step; FLOW_MCP_DEBUG=1 prints timed steps on stderr. Image models are now Nano Banana Pro,
+  Nano Banana 2 Lite and Nano Banana 2.1 (all 0 credits at x1); plain "Nano Banana 2" is gone. The user's call: images
+  ALWAYS default to the newest; newestNanoBanana() picks the highest version number that is not Lite from Flow's own
+  menu, for image jobs with no model, "Nano Banana" or "Nano Banana 2", and for the agent's image default.
+  Verified live, 0 credits: three 3-image batches (all from the agent, right order; 90 s each once All media stopped
+  waiting, against 6.4 min), a batch with a scene forced missing (asked again, then one by one, composer moved from
+  2 Lite to 2.1), and with the menu open and collapsed: flow_characters 6.6 s, flow_assets 5.6 s (was 15.5), the menu
+  still open afterwards. Afterwards Flow had agent mode off, confirm back on Always, no backdrop, panel closed.
+- RENAMED VIDEO NOT FOUND (2026-10-15, reported by a user of the public repo): "locator.waitFor: Timeout 30000ms
+  exceeded ... flow-grid-tile-container[aria-label="<the prompt>"]". A video tile at rest has no media id, so TILE_ID_JS
+  hands back "title:<Flow's title>"; runGeneration then renamed the tile to <project>-<stem> and asked downloadMedia
+  for the OLD title, which no longer existed. The clip was finished and renamed in Flow (credits spent, file not
+  downloaded). Now the handle follows the rename, and a tile that cannot be found again says so in words and points at
+  flow_download. Not re-run on a paid clip yet; images are unaffected (they carry data-media-id).
+  SAME USER, AFTER UPDATING (2026-10-16): "could not be found again in the grid (looked for "<the prompt>")". Watched
+  live on a paid 4 s Omni clip (4 credits, user's OK), logging the top tile every second: 9 s titled with the PROMPT,
+  no thumbnail, NO "NN%" yet; 12 s Flow's own short title ("Paper boat drifting across pond") and "0%"; 34 s "100%";
+  35 s img[alt="Generated video thumbnail"]; 36 s the % gone. The old rule (no "NN%" = finished) took the tile in
+  those first seconds, so the rename failed and the prompt-title then vanished. (The user guessed "after 100%"; it is
+  the start.) freshMedia now counts a video tile without its thumbnail (or a <video>) as busy, and waitForNewMedia
+  takes title-tracked tiles only once the same titles show on two polls running. Same clip with the fix: done in
+  48 s, renamed SettleTest-scene-01, 4.0 s file downloaded.
+- RETRY ONLY THE FAILED IMAGES (2026-10-18, the user's request). A batch that ends "done" with some scenes still
+  failed (after the agent was asked again and the one-by-one route) now records job.failed_scenes (scene numbers).
+  flow_retry on such a job queues a NEW agent batch of just those scenes with agent_numbers, so they save as scene-07,
+  scene-12 (numberOf() in agentRound and the one-by-one fallback); the list moves to the new job so it is never retried
+  twice. The Monitor shows "Retry N failed image(s)" on that batch (before, Retry only showed on failed jobs, and would
+  have re-run the whole batch). The note now starts with "still failed: ..." (the panel clamps notes to two lines).
+  Test hooks: FLOW_MCP_SIMULATE_MISSING=n drops scene n from agent rounds, FLOW_MCP_SIMULATE_FAILED=n skips its
+  one-by-one rerun; neither applies to a retry batch. Verified live, 0 credits: 3 scenes with 2 forced to fail ->
+  done with scene-01/03 and "still failed: scene 2", the panel button pressed in a headless panel -> only scene-02
+  made -> folder 01, 02, 03; the button gone afterwards.
+- TRASH GUARD WAS BLIND TO DUPLICATES: scanGrid keeps one entry per title, so trashAsset's "two items share this name"
+  check never fired and it trashed one of several same-titled tiles. countTitled() counts copies by media id (images)
+  and by how many show at once (id-less videos). Verified: three "Red fox sitting in snow" -> refused.
+- BULK DOWNLOAD PACE (2026-10-19, the user's call: "trim down to random 4-4.4"). A 20-image agent batch took 231 s,
+  113 s of it downloads at ~5.6 s each, all in the steps around Flow's tile menu (More options -> Download -> 1K
+  Original size): a grid re-scan before every tile, hoverTile's fixed 900 ms, waitForDownloadedFile polling once a
+  second (two equal sizes = 2 s minimum), and a fixed 800 ms after. Now: no re-scan when the tile is already mounted,
+  a 250 ms hover then a wait for the More options button itself (locator.isVisible({ timeout }) does NOT wait - it
+  answers at once), 250 ms polling, and each download held to a random 4-4.4 s (downloadPace). Measured on 6 images:
+  4.2, 4.1, 4.2, 4.0, 4.4, 4.4 s, all 1024x1024 originals in scene order. Other hoverTile callers keep 900 ms.
+- CAPTIONS (built 2026-10-08, `src/captions.ts`, Studio tab "Captions", MCP `flow_captions`): Homebrew's ffmpeg 8.1
+  has NO text filters at all (no ass, subtitles, drawtext - no libass/freetype), so captions are drawn by headless
+  Chrome (playwright-core `chromium.launch` on the system Chrome with a throwaway profile, never the Flow profile) as
+  transparent full-frame PNGs, one per distinct caption state, played as an ffconcat image track with exact durations
+  and `overlay`-ed onto the video (libx264 veryfast crf 18, AAC copied). Words come from whisper.cpp (`whisper-cli`,
+  brew `whisper-cpp`) with `-ojf`: build words from TOKENS (leading space = new word), because `-ml 1 -sow` segments
+  run each word into the next and hide every pause. Measured against the waveform: plain token offsets land within
+  ~50 ms of the real word onset; `-dtw` (needs `-nfa`, else t_dtw is -1) was ~150 ms LATE; large-v3-turbo placed a
+  word 0.6 s early and drops punctuation - so small.en > base.en > ... > turbo. 20 s of speech: 1 s to transcribe,
+  ~0.3 s per preview, ~8 s to burn. Transcripts cache in ~/.flow-mcp/captions; the media route only serves
+  OUTPUT_ROOT, uploads and that folder (previews 404'd until it was allowed). Edited text is re-timed by LCS against
+  the heard words; a line break forces a new caption. Captions break at commas and sentence ends; `text-wrap:balance`
+  stops a lone word on line two.
+- TESTING THE PANEL without touching the real one or Flow: a script that sets FLOW_MCP_PORT=8799, FLOW_MCP_HOME and
+  FLOW_MCP_OUTPUT to scratch dirs BEFORE dynamically importing dist/core.js + dist/server.js, overrides
+  core.status/characters/assets (status -> getFlowState -> getBrowser LAUNCHES the Flow Chrome when CDP is down), then
+  startServer(core); open http://127.0.0.1:8799 in the Browser pane. Kill the node pid itself afterwards - pkill on
+  the background shell left it listening.
+- Caption placement: `position` is bottom|middle|top or a number 0-100 (how far down the frame the caption's middle
+  sits); the panel has an exact-height slider and tap-the-preview. Bold pop scales the spoken word by 1.06 - at 1.08
+  with no word margin it swallowed the space beside it ("EVERYTHINGAFTER"), so words carry a .07em margin.
+  First Ascent's finished film survived the Trash only because it was published in an artifact (film.mp4); it is back
+  at ~/flow-mcp-out/Ascent/ascent-1080.mp4.
+- Caption letters (2026-10-09): `letters` as_said | capitals | lowercase, per style in the panel (Bold pop defaults
+  to capitals, the rest to as_said). It is a CSS text-transform on the drawn captions only; the .srt keeps the words as
+  heard. capitals and lowercase drop trailing commas and full stops (? and ! stay), the short-form convention; capitals
+  in a non-bold font take 1.2x the line width, lowercase in Arial Black 0.85x. Panel labels are "Normal / CAPS /
+  lower" because "CAPITALS" and "lowercase" were cut off at 375 px wide.
+- Speech model (2026-10-09, the user's call): it downloads BY ITSELF the first time words are needed - picking a video
+  in the Captions tab, or the first flow_captions call - not from a button. ggml-base.en.bin, 148 MB, from
+  huggingface ggerganov/whisper.cpp (FLOW_MCP_MODEL_URL for a mirror), into ~/.flow-mcp/models, via a .part file.
+  It uses CURL, not fetch: Node's built-in fetch (undici) crashed the whole process with "assert(!this.paused)" when
+  the server closed the connection mid-download, and that process is the panel or Claude's connector. caption_setup
+  is "ready" once whisper-cli exists; the panel shows "Getting the speech model (148 MB, one time only)" while it
+  downloads. Tested with a local stand-in server (HOME pointed at an empty folder): first use, two callers at once
+  (one download), a second download in the same panel process, and an unreachable server (clear error, no leftovers).
+  The real huggingface download has not been run from this code.
+- Caption timing (2026-10-11, "words light up a bit late"): measured on the First Ascent narration against each word's
+  real onset in the sound (words after a pause): whisper's token start was 0.00 s for about half and 0.13-0.18 s LATE
+  for the rest (one outlier 0.53). AV sync tolerance is asymmetric (ITU-R BT.1359: a picture lagging its sound shows from
+  ~45 ms, one leading it goes unnoticed to ~125 ms), so every caption state now starts LEAD = 0.12 s early (`lead`
+  option, -0.5..0.5, MCP only). The .srt shifts with it (first cue 0.22 -> 0.10). Size is now a percentage too
+  (`size` small|medium|large or 40-250; the panel has a 50-180 % slider; old saved presets map to 80/100/120).
+- VOICEOVER IN THE USER'S OWN VOICE (2026-10-12): Flow's Voices tab holds only the 15 stock voices (the same as
+  Google AI Studio's); the user's own voice comes with the "Me" avatar, and the only way to make it speak is a paid
+  video take with reference_images ["asset:Me"] and the line in the prompt ("He says these exact words and nothing
+  else: ..."), keeping just the sound (Omni 1.1 Flash 360p: 4/5/6/7 credits for 4/6/8/10 s). Flow cannot time speech
+  to on-screen titles, so timing is local: flow_transcribe gives each word's start/end, and flow_assemble's
+  voice_lines places each line (file, from, to, at, max_seconds -> atempo up to 1.25x, per-line loudnorm) at its own
+  moment. The voice track is written as PCM WAV: AAC .m4a from delayed+mixed lines was unreadable ("Cannot calculate
+  dts entry length"), and whisper-cli exits 0 and writes no JSON on unreadable audio, so transcribe now checks for it.
+  Cut lines at the gap between words (midpoint), not word end + padding: padding pulled the next word's start in.
+- CAPTION LANGUAGES (2026-10-13): the auto-downloaded model was English-only (base.en) and "auto" picked it, so a
+  Spanish video got English-sounding nonsense with no error ("(speaking in foreign language)" at best). Now three
+  models, each fetched on first need (FLOW_MCP_MODEL_BASE = mirror folder): base.en 148 MB for English (best timing;
+  English fetches it even when a multilingual model exists, falling back to that one only if the download fails),
+  large-v3-turbo-q5_0 574 MB for every other language, and base-q5_1 60 MB that only DETECTS the language for "auto"
+  (whisper-cli -dl; the line "auto-detected language: xx" is on stderr and -np hides it). Measured on Mac `say` lines:
+  turbo heard every Spanish/German word where small-q5_1 (190 MB) misheard "ni un solo" -> "guión solo"; word starts
+  of both were within ~0.05 s of the waveform for most words; base-q5_1 detected 8/8 languages in 0.2 s. Detection
+  runs once per video ("auto" has its own cache entry). UNSPACED languages (ja, zh, yue, th...) get words from
+  Intl.Segmenter over a per-character timeline built from the tokens (tokens there are word pieces: 人/工/知/能), are
+  joined with no space, hold 3x the words per caption and count as full-width; edited text is segmented the same way
+  so alignText still matches. <html lang> is set so capitals follow the language (Turkish BİRLİKTE), RTL scripts get
+  dir=rtl (checked with Arabic text: order and highlight right). The panel has a "Spoken language" select (37 languages
+  + Detect automatically), defaulting to the browser's language when listed, else English; changing it re-listens and
+  drops corrections. The panel read transcribe's `words` (now an array since flow_transcribe) as the word count; it
+  now asks words:false and shows word_count.
+- NAMES IN LOWERCASE CAPTIONS (2026-10-18, the user's rule: "always capitalize names even if lower case selected").
+  namesIn(): a word written with a capital where no sentence starts (the speech model and corrections capitalise
+  names), every other occurrence of it, plus `names` passed in (for a name that only ever starts sentences, "Juno");
+  "I" is not a name. The page marks those words `.w.name{text-transform:none}`. Checked on Sol Tomorrow, boxed
+  lowercase: "Sol said the same word every morning", "he just went". TRAP: the page script lives inside a TS template
+  literal, so a regex there needs `\\p{L}` in the source - with `\p{L}` the page got `p{L}`, matched nothing, and
+  the name stayed lowercase without any error.
+- CAPTIONS WORKFLOW (the user's rule, 2026-10-18): transcribe first, show the words with likely mishearings fixed,
+  get the user's OK, THEN make the video once. The playbook and the flow_captions description say so too.
+
+- KOKORO (2026-10-29, the user's call: the default narration voice). `engine: "kokoro"` is now flow_narrate's default
+  (then gemini, mac). It runs through kokoro-js (npm, so `npm install` is the whole setup on Mac and PC, no Python) in
+  its OWN process, dist/kokoro-worker.js, so the 326 MB model and Hugging Face's fetch-based download never live in the
+  panel or Claude's connector. The model downloads itself on first use into ~/.flow-mcp/models/kokoro (measured 17 s
+  to 93 s); a take after that is ~2 s, 36 s of speech in 8 s. Takes run one at a time. Kokoro reads at most 510 phoneme
+  tokens per pass and silently drops the rest, so the worker splits sentences into <=300-character chunks; each pass
+  also opens with ~0.45 s of silence (joins measured 1.1 s), so every chunk is trimmed to its speech and joined with a
+  0.4 s pause. A 538-character line checked with whisper: every word present, pauses 0.26-0.67 s. 28 English voices,
+  graded on the model card (af_heart A, af_bella A-; the user's pick am_michael C+, the default), `speed` 0.5-2 (panel
+  slider 0.70-1.30). When Google's daily limit answers 429/quota, a gemini take is recorded with Kokoro and the result
+  carries `fell_back_from` + a note - that fallback is NOT tested against a real exhausted key yet. Voice tab: Kokoro |
+  Google AI Studio, each engine keeps its own voice pick (S.narrate.kokoroVoice / geminiVoice).
+- COMPUTER VOICES REMOVED (2026-10-29, the user's call): the `mac` engine (`say` on a Mac, System.Speech on Windows),
+  localVoices and speakLocally are gone; narration is kokoro | gemini only. A panel that saved engine "mac" switches
+  to Kokoro. Kokoro was kept local at first; the user cleared it for GitHub on 2026-11-07.
+- NARRATION RUNS IN THE CALLER (2026-10-29): voices/narrate are module functions (voicesHere, narrateHere) used by
+  LocalCore AND RemoteCore, because they never touch Chrome. Claude Desktop's own flow-mcp often owns 8787 with code a
+  release behind (the user cannot always restart), and a client forwarding narrate to it got the old engine list.
+  Verified: a fresh client process recorded a Kokoro line while the stale owner (pid unchanged) kept 8787. The panel
+  page itself is read from disk on every request, so after a build the PANEL is new while its API is the owner's: the
+  Voice tab stays broken until the owner restarts. story_pitches (playbook) is served by the caller's index.ts too.
+- FIRST FRAME FROM A CLIP (2026-10-29): flow_generate's `first_frame` may be a finished .mp4; the queue swaps in its
+  last frame (extractLastFrame), i.e. chain_previous across separate calls, so each clip can be reviewed before the
+  next is paid for. Made for The Last Slice (3 x 10 s Omni 1.1 Flash 720p = 45 credits, every join invisible).
+- CAPTIONS FROM THE CLEAN NARRATION (2026-10-29, captions came out "off" on The Last Slice): transcribing the MIXED
+  film (narration + the clips' crashes at 30%) made whisper squeeze the first five words after each pause onto one
+  instant (10.18 s, zero length) and drop all punctuation, so the panel's captions ran up to 1.5 s early. flow_assemble
+  keeps the narration as <film>-voice.wav on the film's timeline (it can be shorter than the film); transcribe now
+  hears that instead. Even the clean track squeezed words after long silences ("Why risk it all for one" at 20.24 s),
+  so its spoken stretches (silencedetect -40 dB, >= 0.6 s) are each heard separately and shifted back. Measured against
+  the known narration times: Tonight 10.41 (true 10.42), Why 20.42 (20.42), waiting 27.03 (27.0), punctuation back.
+  Cache key carries the voice track + "spans". Transcribe/captions now also run in the CALLER like narration.
+- CAPTIONS ON DIALOGUE (2026-10-30, First Lesson: two people talking in a car, no narration track): heard whole, the
+  engine noise made whisper put "See?" 0.5 s and "You were braver" 0.9 s early. Every non-clean track is now cut into
+  speech stretches by whisper.cpp's own detector, `whisper-vad-speech-segments` (ships with brew whisper-cpp; model
+  ggml-silero-v5.1.2.bin, 0.9 MB, fetched on first use from huggingface ggml-org/whisper-vad), each heard on its own,
+  and no word may start before its stretch's detected onset (whisper liked to start the first word at the window's
+  edge, 0.3 s early). whisper-cli's own --vad is NOT usable for this: its token times are on the squeezed timeline and
+  its segments run on through seconds of noise. The detector's list comes out once (stdout or stderr) in centiseconds.
+  A first stretch within 2 s of the start is opened to 0:00 with no floor ("Dad!" over the stall noise was missed).
+  Measured against the loudness (-40 -> -20 dB jumps): See? 15.39, Don't 18.27, You 23.78, all exact; The Last Slice
+  (clean track, silencedetect path) unchanged. Cache tag "spans-v5".
+- LAST FRAME FROM A CLIP (2026-10-30): flow_generate's `last_frame` may be a finished .mp4; the queue swaps in its
+  FIRST frame (extractFirstFrame in chain.ts). With first_frame = the clip before and last_frame = the clip after, a
+  middle clip is redone with both cuts invisible (Midnight clip 2: Flow had dissolved from the gears to the clock face;
+  the redo is one move down, and its last frame matched clip 3's first exactly).
+- CORRECTED WORDS TAKE THE MISHEARD WORD'S TIME (2026-10-30, Midnight): alignText spread an unmatched corrected word
+  over the whole gap between its matched neighbours, so "Pim" (heard "Pym") started right after the previous line,
+  4.6 s early. Now the heard words in the same gap are used: equal counts map one to one ("Pym"->"Pim", "12"->"twelve"),
+  otherwise the corrected words share the heard words' stretch. Checked: "Pim found the" 10.30 s (line placed at 10.5).
+- ALIGNMENT, TWO MORE CASES (2026-10-30, Last Train dialogue): (1) a word the listener missed entirely ("That" in
+  "That was the 949") sat at the start of the pause before it (2 s early); now it goes just before the next word, 0.3 s
+  per word. (2) whisper prints a speaker-change dash as its own token; pairing "fifty" with "-" made a zero-length
+  caption. Only tokens with letters or digits count when corrected words borrow heard times.
+- OPENING STRETCH (2026-10-30, Last Train: footsteps for 1.3 s before the first line): opening the first stretch to
+  0:00 with no floor bunched Theo's whole line at 0:00. It now starts 0.2 s before the first loud spike (18 dB over the
+  quietest fifth of the track, or the detector's onset if earlier), which is also its floor. Checked: Last Train
+  "You" 1.26 / "fifteen" 1.98 (speech 1.3-3.0), First Lesson "Dad!" 0.53 (spike 0.55). Cache tag "spans-v7".
+- NEW PROJECT, TRIMS, END CARD (2026-10-30, for a UGC ad shot from scratch): `flow_new_project` (createProject in
+  flow.ts) - Flow's home page has one button "New project" (getByRole button /new project/i, mapped live), which opens
+  /project/<uuid>; the project's name is the textbox "Editable text" on the project page, filled + Enter. Not yet run
+  live (its first run was meant to be on camera). flow_assemble got `trims` (one {from,to}|null per clip, applied as
+  input -ss/-t, clamped to the clip) and `end_card` {text, seconds}: renderEndCard (captions.ts, the captions' headless
+  Chrome) draws big centred words (12% of the frame's short side, 8.5% past 40 characters) over the last kept frame,
+  blurred 28 px at 42% brightness, saved as <name>-endcard.mp4 with silent audio and joined like a clip. Tested on
+  Last Train: trims [{from:1}, null, {to:8}] + a 2.5 s card -> 29.55 s, 4.7 s to make.
+- SETTINGS POPOVER CLOSED BY THE MODEL MENU'S ESCAPE (2026-10-30, first image in a brand-new project): the project
+  already sat on the newest Nano Banana, so pickModel closed its menu with Escape - which also closed the settings
+  popover, and the next pickRadio failed with 'Flow has no "x2" option'. pickRadio now reopens the popover
+  (openSettings) before giving up. Until the owner process reloads, naming the model ("Nano Banana 2.1") avoids it.
+- FIRST FRAME AT A CHOSEN SECOND (2026-10-30, KOVA bottle ad: clip 1's speech ended at 6.5 s, then 3 s of nodding):
+  flow_generate's `first_frame_at` (seconds) with a clip as first_frame starts the next clip from that frame instead of
+  the last (extractFrameAt in chain.ts); flow_assemble's `trims` cuts the earlier clip at the same second, so the join
+  stays invisible with no editor. The user's line for the video: "Flow MCP cuts it for you." Also: size clips to their
+  words (Omni 4/6/8/10 s) instead of always 10 s.
+- PRODUCT FLIPS MORPH (2026-10-30, KOVA clip 2, 10 credits): "turn the bottle upside down, shake, turn it upright" came back
+  with the lid jumping to the other end of the bottle around 4.3 s, while the first and last frames looked perfect, so a
+  start/end check missed it. A symmetric object turned end over end loses its ends. The playbook now says: keep a
+  product's orientation fixed, and check every 1/8 s of motion before showing a clip.
+- B-ROLL INSERTS + OUTFIT (2026-10-30, matcha UGC ad, the structure the user took from ChatGPT: talk / product shot /
+  talk). flow_assemble `inserts` [{clip, over, at, seconds, from, volume}] lays a cutaway's picture over part of a clip
+  while that clip's own sound keeps playing: the line "Strawberry, milk, and matcha..." from clip 3 plays over the drink
+  close-up and the picture cuts back to her on "Would you try it", in sync. voice_lines was wrong for this: it levels
+  each line to -16 LUFS while Flow takes sit near -24, an 8 dB jump. flow_generate `outfit` (per scene) keeps the
+  character lock on face/hair/build but takes the clothes from the scene; without it the lock's saved look (Skye's
+  denim shirt) fights a costume (cream sweatshirt). Both need the owner process restarted; this ad was cut by running
+  dist/assemble.js directly. Talking clips: R2V with ["asset:Skye", the car still] (her saved voice Aoede in both);
+  product shot: I2V from a free still. 3 clips, 40 credits, every clip right first time.
+- MATCHA AD V2 + LOUDNESS (2026-10-30): flow_assemble `loudness` (LUFS, -30..-9) runs loudnorm on the finished mix;
+  Flow takes sit near -24 LUFS, quiet on a phone, so ads go out at -14. "Too static, like a robot" was fixed with a
+  hand-held selfie take (her arm runs out of frame, gentle sway) and one simple action with the product already in
+  hand (one sip through a straw), plus a hand-held arc on the B-roll instead of a locked-off cup. Both passed the 1/8 s
+  check first time (22 credits). Flow's "Add AI credits" banner (low balance) also ends in "credits": the quote is now
+  read from a link named "<N> credits" only. A take can open on a stray half-word (heard as "suffix"): listen to the
+  first second of every take and trim it.
+- SIP CLIPS + REPEATED LINES (2026-10-30, matcha v3, 12 credits): with a CLEAR straw the model never moved liquid up it
+  ("when she drinks nothing going up on the straw"); the redo used an opaque pink paper straw, in the free still first
+  and then in the prompt, and passed the 1/8 s check. The take then said "Would you try?" and then the whole line
+  ("Would you try it, or stick to coffee?"). Cut the repeat with no new code: list the clip TWICE in flow_assemble's
+  `clips` with two `trims` that skip the first attempt, cutting in the quiet gaps (token times + 50 ms RMS). Same pose on
+  both sides, so the jump is barely visible. Transcribe EVERY take with token times before showing it.
+  The first v3 cut was wrong at the clip 2 -> 3 join (the user heard it): scene-10 opens on a stray syllable
+  (0.05-0.35 s, heard as "This.") and I cut at 0.3, leaving its tail on the cut; and that take's room noise sat 8 dB
+  above clip 2's, so the background jumped. trims entries now take `volume` (0-2), `fade_in`, `fade_out`, and every
+  trimmed edge gets a 15 ms fade so a cut never clicks. Fixed with from 0.45, volume 0.4 on the sip stretch: the level
+  is -38 on both sides of the cut. Check 50 ms RMS ACROSS every join, not just the words.
+  Then an "s" was still audible (the user again): plain RMS hid it under the room noise. Above 4 kHz
+  (highpass=f=4000 twice, 20 ms RMS) it stood out: -31 dB at 0.40-0.56 s of the take against -89 around it, plus a
+  40 ms tick at 3.46. Cut points moved to 0.6 / 3.44 / 4.44; every join now reads -82 dB or lower in that band. Check
+  the HISS BAND across every join too, not only loudness and words.
+- CHARACTER FROM A PICTURE KEPT A STALE LOOK (2026-10-30, protein soda ad): characters.json is keyed by name and only
+  `describe` wrote it, so a new "Maya" made from the user's photo would have been locked to an OLD Maya description
+  (ponytail, mustard sweater) in every scene. flow_character now takes `look` (the picture in words) with `image`, and
+  without it drops any older description under that name (forgetCharacter). Needs the owner restart; until then the
+  look was written with dist/flow.js rememberCharacter directly.
+- "PROMINENT PEOPLE" REFUSAL (2026-10-30, protein soda clip 1): a character made from the USER'S UPLOADED PHOTO made
+  free stills fine, but every VIDEO with it failed: the tile said "This prompt might violate our policies about
+  generating prominent people" (refunded, 61 credits kept). The queue only reported a generic "failed" and pressed
+  Flow's Retry, which cannot help. waitForNewMedia now reads `.error-message-text` (errorReason; checked on the live
+  tile), never retries a policy refusal, and says in Flow's words what happened plus what to do: draw the character
+  from a description instead. Never try to get the same face past the filter.
+- NO SUBTITLES BY DEFAULT (2026-10-30, the user's rule: "it should be default for you to tell flow never to generate
+  subtitles"). Omni burned garbled captions ("thyel", "voch", "roil") into 0.8-4.9 s of a 15-credit talking clip, though
+  the prompt said "No text, captions or subtitles" near its end. core.generate now opens AND closes every video prompt
+  with a no-subtitles/no-text clause; `on_screen_text: true` on a scene turns it off (a sign, a title card). Checked by
+  building prompts with a stubbed queue. Captions are made afterwards with flow_captions, where the words are checked.
+- PHONE IN THE SHOT + CROP (2026-10-30, protein soda clip 3, 12 credits, only 9 left so no redo): the prompt said "the
+  phone is propped upright ... she is never holding the phone", and Omni drew a second iPhone on a stand in the
+  bottom-left corner for the whole clip. Naming an object, even to rule it out, can put it in the picture: describe the
+  camera ("a fixed camera at her eye level, about 70 cm away") and never mention the phone. flow_assemble `trims`
+  entries now take `crop` {x, y, w, h?} (fractions; h defaults to w so the shape holds): {x:0, y:0, w:0.78} punched in
+  1.28x and dropped the corner; checked at 2 frames a second along the bottom edge, nothing left. The punch-in sits
+  right after the can cutaway, where an editor would put one anyway. Ad: protein-soda-ad.mp4, 16.4 s, -13.1 LUFS.
+- REFRAMING SOMEONE ELSE'S EXPORT (2026-10-30): the user cut the ad in another Google tool and got a 1920x1080 file with
+  the vertical picture in the middle (x 656-1263), white bars both sides, a soft subtitle track, and Gemini's sparkle
+  mark in the picture's bottom-right corner. flow_assemble now sizes a cropped clip by what it KEEPS (it used to size the
+  film by the landscape canvas), crop fractions go down to 0.1, and `size` ("1080x1920") sets the master. One clip with
+  crop {x:0.3638, y:0, w:0.2724, h:0.8602} -> 1080x1920, bars and mark gone (corner checked once a second), subtitle
+  track dropped, -13.9 LUFS. Voice check by median pitch (numpy autocorrelation): Flow's Callirrhoe takes ~215 Hz, that
+  tool's takes ~230 Hz on both talking clips, so its voice is consistent within itself but not Flow's.
+- CAPTION CORRECTIONS SPLITTING A WORD WERE IGNORED (2026-10-30, matcha ad): whisper heard "your iced" as "youriced"; the
+  corrected text was compared with the transcript with every space removed, so "your iced" == "youriced" and the
+  correction was dropped as "no change". timedWords now compares word by word (space-free only for unspaced languages).
+  Also, burnCaptions/previewCaptions called directly with no `size`/`position` drew tiny serif captions (no font size
+  on the page): they now default to medium/bottom themselves. Both need the owner restart; the matcha captions were
+  made by running dist/captions.js directly. Two looks for the two ads, the user's call: soda = bold, lime #B8E62E;
+  matcha = highlight, strawberry #F2557E.
+- HITCH AT EVERY JOIN (2026-10-31, the user saw it at 47-48 s of Three Tiers): AI clips carry 0.03-0.05 s more sound
+  than picture, and the concat filter pads the shorter picture with repeated frames, so each cut froze for a frame or
+  two (found at 37.79/38.00/48.04 s by frame differences < 0.2). assemble's probe now takes the VIDEO stream's duration
+  and trims every clip's sound to it (atrim=end). Checked: the same three clips -> no frozen frames, cuts exactly at
+  37.75 and 47.75, picture and sound both 57.75 s. When joining by hand, trim the audio to the picture the same way.
+- SHARPNESS SNAP AT A CONTINUATION (2026-10-31, "a skip frame" at 47.75 s of Three Tiers): a clip animated from the
+  previous clip's exact last frame matched it in position, zoom and colour, but Omni clips soften over their 10 s
+  while the continuation is drawn from a crisp still: detail jumped 190 -> 330 (Laplacian variance) in one frame.
+  flow_assemble `trims[i].soften_in` (seconds) measures both sides, picks the gblur sigma that matches the earlier
+  clip's end (0.6 here) and fades that blur out over the given time: the curve now runs 1895 -> 1779 -> 1701, no step.
+  Tried and REJECTED: dissolving from the frozen last frame (stalls the motion for two frames: a hitch of its own) and
+  a 3-frame crossfade of the moving tails (ghosted both faces into double images). The remaining tiny jump is the
+  model redrawing the frame; only a new clip can remove it.
+- LOUDNESS LANDS ON TARGET (2026-10-31): flow_assemble's single loudnorm pass is held back by its -1.5 dBTP ceiling
+  (Three Tiers: asked -14, got -14.9; the ads earlier came out -13.1/-13.9). It now measures the finished film and, when
+  more than 0.3 LU off, corrects with plain gain + alimiter (limit 0.84) on a video-copy remux; the result carries
+  `loudness`. Three Tiers: -14.1 LUFS, true peak -1.4 dBTP.
+- CONTINUATION CAMERA (2026-10-31, Three Tiers clip 6, five takes): a clip animated from the previous clip's last frame
+  must keep the camera moving the SAME WAY. Clip 5 ended drifting slowly backwards; takes that pushed in (or pulled
+  back to make room for a dismount) read as a "skip" at the join even with matching frames. Measure the drift on both
+  sides (best-fit scale of the top band between frames 12 apart: s>1 = moving back) and name it in the prompt ("keeps
+  drifting very slowly backwards, exactly as it already is; never moves toward them"). A whisper slice that cuts a
+  line's first word in half invents words ("Told" -> "Totally"): it is not a false start.
+- WATERMARK (2026-10-31, the user asked): Google's video models (Vids, Flow) put a four-point sparkle, 71 px at
+  1080p, in the bottom-right corner (centre ~1740,900). flow_assemble `remove_watermark: true` finds it without being
+  told where: frames sampled across every clip at film size (1.5 per second), each pixel's 5th-percentile value, points
+  45+ brighter than their 31x31 neighbourhood, the densest 100 px window = the mark (a white wall shared by clips also
+  passes, so never take the bbox of all hits). Its centre is see-through and barely stands out, so the mask is a filled
+  astroid around that box (P5 PGM), painted out with `removelogo` on the joined picture. Three Tiers: box 1704-1775 x
+  864-935, corner shows plain cobbles at 5 moments. With 32 samples only the bottom half registered: keep the sample
+  count up. The invisible SynthID mark stays; platforms still expect an AI-content label.
+- WATERMARK ON VERTICAL FILMS (2026-11-01, Glow UGC): watermarkMask scaled its search window by height / 1080, so a 1080x1920
+  film got a 178 px window, spurious bright points widened the box to 125x93, and a corner of the sparkle stayed visible
+  while the tool reported "painted out". Scale is now by the short side: box 864-935 x 1704-1776, the same 71 px mark.
+  Always look at the corner after painting; the returned message only says a mask was made. Faint smudges remain where
+  the mark crossed sharp edges.
+- MUSIC UNDER A VOICE + THICK WATERMARK (2026-11-01, The Last Delivery): flow_assemble `duck_music` pulls the music down with sidechaincompress while the voice
+  speaks, and `music_curve` [{at, volume}] shapes it over the film (straight lines, volume expression with eval=frame). A long Extend chain redraws
+  Google's sparkle each hop, so by clip 8 it had a black outline and a fatter diamond that the star mask missed while the tool still said "painted out"
+  (outline visible at 72 and 88 s). `watermark_margin` (10 here) grows the mask and makes it a diamond: no outline, a soft smudge remains on hard texture.
+  `end_hold` {seconds, fade} holds the last frame and fades the picture to black (music_curve fades the sound with it). Checked on The Last Delivery: 103.75 s, -14.4 LUFS.
+  The speech check hears "deliveries stopped" as "delivery stopped" on both Tyra and Kokoro: it is the listener, not the voice. Pass the real words as `text` to burnCaptions.
+

@@ -135,7 +135,7 @@ server.registerTool(
   "flow_retry",
   {
     title: "Retry failed Flow jobs",
-    description: "Put failed jobs back in the queue with the same settings and file names (default: all failed jobs). Scenes already retry once on their own when Flow reports a failure.",
+    description: "Put failed jobs back in the queue with the same settings and file names (default: all failed jobs). Scenes already retry once on their own when Flow reports a failure. An image batch that finished with some images still failed (its job lists failed_scenes) is not run again whole: only those images are made again, saved under their own scene numbers.",
     inputSchema: shapes.retry,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -170,7 +170,7 @@ server.registerTool(
   {
     title: "Fast image batch via Flow's agent",
     description:
-      "Hand up to 50 image scenes to Flow's own Agent mode, which renders them all in parallel (about a minute for a whole batch) and enriches each prompt itself. Images only, 0 credits. Less exact than flow_generate: the agent picks the wording, no techniques/reference images, and file order is best-effort. Use flow_generate when every scene needs exact settings. Returns a job id; use flow_wait.",
+      "Hand up to 50 image scenes to Flow's own Agent mode, which renders them all in parallel (minutes for a whole batch instead of one paced job per scene) and enriches each prompt itself. Images only, 0 credits. Pass `references` (characters, places, objects, each with a short name) to attach them once in the agent's composer, the way its + button does, and `scene_references` to say which scenes use which, so a whole story stays on-model. Scenes the agent drops are asked for again, then made one by one with their references. Less exact than flow_generate: the agent picks the wording, no techniques, and each image is matched back to its scene by its stored prompt. Returns a job id; use flow_wait.",
     inputSchema: shapes.agent,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -250,6 +250,17 @@ server.registerTool(
 );
 
 server.registerTool(
+  "flow_new_project",
+  {
+    title: "Start a new Flow project",
+    description: "Create a new, empty Google Flow project and open it in the Flow window, optionally with a name - for starting a film or ad from scratch. Free. Characters belong to a project, so make them again in the new one.",
+    inputSchema: shapes.new_project,
+    annotations: { openWorldHint: true },
+  },
+  (args) => reply(patient("flow_new_project", core.new_project(args))),
+);
+
+server.registerTool(
   "flow_characters",
   {
     title: "List characters",
@@ -275,9 +286,9 @@ server.registerTool(
 server.registerTool(
   "flow_narrate",
   {
-    title: "Record narration in a Flow voice",
+    title: "Record narration",
     description:
-      "Record narration as an .m4a, free and instantly. `engine: \"gemini\"` uses Google AI Studio's text-to-speech (the same voices Flow has, needs a free key in ~/.flow-mcp/gemini-key, and takes a `style` note like 'warmly, like a documentary narrator'); `engine: \"mac\"` uses a voice installed on this computer (macOS, or Windows' built-in speech voices). Neither costs credits or caps the length. flow_assemble can lay the result over a film.",
+      "Record narration as an .m4a, free. The default `engine: \"kokoro\"` is Kokoro, a voice that runs on this computer: no key, no daily limit, any length, 28 English voices (flow_voices lists them; default am_michael) and a `speed`. The first Kokoro take downloads its model once (326 MB, about a minute). `engine: \"gemini\"` uses Google AI Studio's text-to-speech (the same voices Flow has, a free key in ~/.flow-mcp/gemini-key, a daily limit, takes a short `style` note); if that limit is used up the line is recorded with Kokoro and the result says so. Neither costs credits. Record a whole narration in one take; flow_assemble can lay it over a film.",
     inputSchema: shapes.narrate,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -288,7 +299,7 @@ server.registerTool(
   "flow_voices",
   {
     title: "List Flow voices",
-    description: "Narrator voices available for flow_narrate: Google AI Studio's (with whether a key is set up) and the English voices installed on this computer.",
+    description: "Narrator voices available for flow_narrate: Kokoro's (free, on this computer, with whether its model is downloaded yet) and Google AI Studio's (with whether a key is set up).",
     inputSchema: shapes.voices,
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
@@ -305,6 +316,42 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   (args) => reply(patient("flow_assemble", core.assemble(args))),
+);
+
+server.registerTool(
+  "flow_transcribe",
+  {
+    title: "Hear the words in a video or audio file",
+    description:
+      "Transcribe a video or audio file on this computer with every word's start and end time (whisper.cpp, local and free, about 100 languages; pass `language` when you know it. The first call in English downloads a 148 MB speech model once, in any other language a 574 MB one). Use the times to check a take said the right words and to cut lines out of it for flow_assemble's voice_lines.",
+    inputSchema: shapes.transcribe,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  (args) => reply(patient("flow_transcribe", core.transcribe(args))),
+);
+
+server.registerTool(
+  "flow_captions",
+  {
+    title: "Add captions to a video",
+    description:
+      "Burn spoken-word captions into a video, in the style short-form apps use, for landscape or vertical footage (local and free: whisper.cpp hears the words on this computer, nothing is uploaded). Styles: bold (big capitals, the spoken word lights up), highlight, reveal, clean, boxed. Works in about 100 languages, including ones written without spaces (Japanese, Chinese, Thai) and right to left (Arabic, Hebrew); pass `language` (en, es, tr, ja...) whenever you know it. The first call downloads a speech model once: 148 MB for English, 574 MB for other languages. Saves <name>-captions.mp4 plus an .srt. Before calling this, call flow_transcribe, show the user the words with any likely mishearings fixed, and get their OK: then pass the agreed words as `text` (matching words keep their timing), so the video is made once, right.",
+    inputSchema: shapes.captions,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  (args) => reply(patient("flow_captions", core.captions(args))),
+);
+
+server.registerTool(
+  "flow_presenter",
+  {
+    title: "Talking presenter over footage",
+    description:
+      "Build an explainer from one recording of a talking presenter (an avatar video, say): each stretch shows them full frame, with an optional slow zoom, or in a circle in a corner over another clip. Their sound plays throughout. Local and free. Add music, loudness and watermark removal afterwards with flow_assemble.",
+    inputSchema: shapes.presenter,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  (args) => reply(patient("flow_presenter", core.presenter(args))),
 );
 
 await server.connect(new StdioServerTransport());
