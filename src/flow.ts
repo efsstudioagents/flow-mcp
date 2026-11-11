@@ -842,6 +842,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   const s = job.params;
 
   await ensureProjectGrid(page);
+  if (s.collection) await openCollection(page, s.collection);
   const agent = page.getByRole("button", { name: "Agent", exact: true });
   if ((await agent.getAttribute("aria-pressed")) === "true") await agent.click();
   const clear = page.getByRole("button", { name: "Clear prompt" });
@@ -1223,6 +1224,16 @@ async function ensureCollectionPath(page: Page, path: string): Promise<string> {
     parent = name;
   }
   return levels[levels.length - 1];
+}
+
+// Opens a collection in the grid (creating the path when missing), so a generation starts from inside it.
+async function openCollection(page: Page, path: string): Promise<void> {
+  const leaf = await ensureCollectionPath(page, path);
+  const row = await sidebarRow(page, leaf);
+  if (!row) throw new Error(`Collection "${leaf}" is not in the sidebar.`);
+  await page.mouse.click(row.x + row.width / 2, row.y + row.height / 2);
+  await pause(page, 2000);
+  await scrollToTop(page);
 }
 
 export async function nestCollection(child: string, parent: string): Promise<string> {

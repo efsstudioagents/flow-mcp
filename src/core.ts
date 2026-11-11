@@ -66,6 +66,10 @@ const sceneSchema = z.object({
     .boolean()
     .optional()
     .describe("Use the previous scene's finished image as an extra reference, so this scene inherits its exact drawing of the characters, style and palette. Best way to keep a set of stills on-model."),
+  collection: z
+    .string()
+    .optional()
+    .describe("Flow collection to generate into, e.g. 'Dumps/Noite em SP' (created when missing). Keeps the project's root (All media) clean."),
   chain_previous: z
     .boolean()
     .optional()

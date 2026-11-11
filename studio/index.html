@@ -322,7 +322,7 @@ dialog h2{font-size:34px}
         <h2>Quadros <small>grátis</small></h2>
         <p class="lede">Imagens paradas: storyboard, ou o primeiro e o último quadro de um clipe. Ligue <b>Seguir o quadro anterior</b> para cada quadro herdar o anterior. É isso que mantém o personagem idêntico numa sequência.</p>
         <div class="card">
-          <label class="f">Pasta do projeto</label><input type="text" id="f_project" placeholder="MeuFilme">
+          <div class="grid2"><div><label class="f">Pasta do projeto</label><input type="text" id="f_project" placeholder="MeuFilme"></div><div><label class="f">Coleção no Flow (opcional)</label><input type="text" id="f_collection" placeholder="Ex.: Dumps/Noite em SP · vazio = raiz do projeto"></div></div>
           <div class="grid2">
             <div><label class="f">Formato</label><div class="seg" data-seg="f_aspect"></div></div>
             <div><label class="f">Versões por quadro</label><div class="seg" data-seg="f_variants"></div></div>
@@ -346,7 +346,7 @@ dialog h2{font-size:34px}
         <h2>Cenas</h2>
         <p class="lede">Clipes de vídeo. Dê a uma cena o primeiro e o último quadro e o Flow anima entre eles, ou encadeie na cena anterior para um movimento contínuo. O Flow cobra pela duração; a estimativa aparece embaixo.</p>
         <div class="card">
-          <label class="f">Pasta do projeto</label><input type="text" id="s_project" placeholder="MeuFilme">
+          <div class="grid2"><div><label class="f">Pasta do projeto</label><input type="text" id="s_project" placeholder="MeuFilme"></div><div><label class="f">Coleção no Flow (opcional)</label><input type="text" id="s_collection" placeholder="Ex.: Dumps/Noite em SP · vazio = raiz do projeto"></div></div>
           <label class="f">Modelo</label><select id="s_model"></select>
           <div class="grid2">
             <div><label class="f">Formato</label><div class="seg" data-seg="s_aspect"></div></div>
@@ -553,8 +553,8 @@ const VIDEO_COST = { "Omni 1.1 Flash": { "360p": { 4: 4, 6: 5, 8: 6, 10: 7 }, "7
 const blank = () => ({ prompt: "", technique: "", chain: false, match: false, first: null, last: null, refs: [] });
 const DEFAULTS = {
   tab: "cast",
-  frames: { project: "MyFilm", aspect: "16:9", variants: 1, engine: "exact", scenes: [blank()] },
-  shots: { project: "MyFilm", model: "Omni 1.1 Flash", aspect: "16:9", duration: 8, resolution: "720p", variants: 1, quality: "original", max: 25, scenes: [blank()] },
+  frames: { project: "MyFilm", collection: "", aspect: "16:9", variants: 1, engine: "exact", scenes: [blank()] },
+  shots: { project: "MyFilm", collection: "", model: "Omni 1.1 Flash", aspect: "16:9", duration: 8, resolution: "720p", variants: 1, quality: "original", max: 25, scenes: [blank()] },
   narrate: { project: "MyFilm", engine: "kokoro", kokoroVoice: "am_michael", speed: 100, geminiVoice: "Charon", text: "", style: "" },
   cut: { project: "MyFilm", music: null, voiceover: null, hold: true, clips: [] },
   captions: { video: null, style: "bold", position: "bottom", size: 100, colors: {}, text: "" },
@@ -1177,6 +1177,7 @@ $("#roll").onclick = async () => {
     variants: cfg.variants,
     technique: sc.technique || undefined,
     reference_images: sc.refs.length ? sc.refs.map(ref) : undefined,
+    collection: cfg.collection?.trim() || undefined,
     ...(video
       ? { model: cfg.model, max_credits: cfg.max, download_quality: cfg.quality, ...(cfg.model.startsWith("Omni") ? { duration: cfg.duration, resolution: cfg.resolution } : {}), chain_previous: (i > 0 && sc.chain) || undefined, first_frame: sc.chain ? undefined : ref(sc.first), last_frame: ref(sc.last) }
       : { max_credits: 0, reference_previous: (i > 0 && sc.match) || undefined }),
@@ -1327,6 +1328,11 @@ function renderAll() {
 $("#s_model").addEventListener("change", (e) => { S.shots.model = e.target.value; save(); renderAll(); });
 for (const [id, path] of [["f_project", "frames"], ["s_project", "shots"], ["n_project", "narrate"], ["c_project", "cut"]])
   $("#" + id).addEventListener("input", (e) => { S[path].project = e.target.value; save(); });
+// Coleção do Flow onde gerar: o Flow salva a mídia nova na coleção aberta, e a raiz do projeto fica limpa.
+for (const [id, path] of [["f_collection", "frames"], ["s_collection", "shots"]]) {
+  $("#" + id).value = S[path].collection ?? "";
+  $("#" + id).addEventListener("input", (e) => { S[path].collection = e.target.value; save(); });
+}
 (async () => {
   if (!LIVE) {
     $("#offline").innerHTML = `<div class="hint" style="border-left-color:var(--bad)"><b>Esta é só uma prévia: nada aqui está conectado.</b><br>Abra o painel de verdade: dê dois cliques em <b>Flow Studio.command</b> na pasta flow-mcp e use <b>http://127.0.0.1:8787</b>.</div>`;
