@@ -111,7 +111,7 @@ const captionFields = {
     .describe("Lowercase only: names to keep capitalised even where they start a sentence (e.g. [\"Juno\"]). Names in the middle of a sentence are found by themselves."),
   text: z.string().max(50_000).optional().describe("Corrected words, to fix anything misheard. Timings are kept for every word that still matches; a line break starts a new caption."),
   words: z
-    .array(z.object({ text: z.string().min(1), start: z.number().min(0), end: z.number().min(0) }))
+    .array(z.object({ text: z.string().min(1), start: z.number().min(0), end: z.number().min(0), br: z.boolean().optional().describe("true starts a new caption at this word.") }))
     .max(5000)
     .optional()
     .describe("Word timings to use instead of hearing the whole video, e.g. from flow_transcribe on each clip of a joined film, shifted by where each clip starts in it. Use it when the film's own sound (music, a train, crowd) throws the timing off. text still corrects the words on top."),

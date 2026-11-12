@@ -594,13 +594,14 @@ function paginate(words: Word[], maxWords: number, maxChars: number, sep: string
   return pages;
 }
 
-function layout(heard: Word[], style: CaptionStyle, width: number, height: number, size: CaptionSize, letters: CaptionLetters, lead: number, lang: string): { pages: Word[][]; states: State[] } {
+function layout(heard: Word[], style: CaptionStyle, width: number, height: number, size: CaptionSize, letters: CaptionLetters, lead: number, lang: string, exact = false): { pages: Word[][]; states: State[] } {
   // A word's end is capped by its length: the speech model lets the last word of a line run on through laughter or a
   // train arriving, which kept "Adventurous!" and "To a second date." on screen for 7 s (Last Train).
   const longest = (t: string) => Math.min(1.4, 0.35 + 0.075 * t.replace(/[^\p{L}\p{N}]/gu, "").length);
   const words = heard.map((w) => {
     const start = Math.max(0, w.start - lead);
-    return { ...w, start, end: Math.max(start, Math.min(w.end - lead, start + longest(w.text))) };
+    // Timings given by hand (text on a silent video, say) are kept as they are: the cap is for speech.
+    return { ...w, start, end: exact ? Math.max(start, w.end) : Math.max(start, Math.min(w.end - lead, start + longest(w.text))) };
   });
   const s = CAPTION_STYLES[style];
   const u = (Math.min(width, height) / 100) * scaleOf(size);
@@ -756,7 +757,7 @@ async function withPage<T>(width: number, height: number, html: string, use: (pa
 
 const pickColor = (o: CaptionOptions) => (o.color && /^#[0-9a-f]{6}$/i.test(o.color) ? o.color : CAPTION_STYLES[o.style].color);
 
-async function timedWords(video: string, o: CaptionOptions): Promise<{ transcript: Transcript; words: Word[] }> {
+async function timedWords(video: string, o: CaptionOptions): Promise<{ transcript: Transcript; words: Word[]; exact: boolean }> {
   const given = o.words?.filter((w) => w.text.trim() && Number.isFinite(w.start) && Number.isFinite(w.end)).sort((p, q) => p.start - q.start);
   const transcript: Transcript = given?.length
     ? { words: given, text: given.map((w) => w.text).join(" "), language: o.language && o.language !== "auto" ? o.language : "en", model: "given timings" }
@@ -768,16 +769,16 @@ async function timedWords(video: string, o: CaptionOptions): Promise<{ transcrip
   const flat = (s: string) =>
     UNSPACED.has(transcript.language) ? norm(s.replace(/\s+/g, "")) : s.split(/\s+/).map(norm).filter(Boolean).join(" ");
   const same = edited !== undefined && flat(edited) === flat(transcript.text) && !edited.includes("\n");
-  return { transcript, words: edited && !same ? alignText(transcript.words, edited, transcript.language) : transcript.words };
+  return { transcript, words: edited && !same ? alignText(transcript.words, edited, transcript.language) : transcript.words, exact: !!given?.length };
 }
 
 // One still of the real video with the real captions on it, so the panel shows exactly what will be made.
 export async function previewCaptions(video: string, opts: CaptionOptions): Promise<{ image: string; at: number }> {
   const o = withDefaults(opts);
   const info = await probe(video);
-  const { transcript, words } = await timedWords(video, o);
+  const { transcript, words, exact } = await timedWords(video, o);
   const lang = transcript.language;
-  const { pages, states } = layout(words, o.style, info.width, info.height, o.size, lettersOf(o), o.lead ?? LEAD, lang);
+  const { pages, states } = layout(words, o.style, info.width, info.height, o.size, lettersOf(o), o.lead ?? LEAD, lang, exact);
   // A caption of a few words, about a third of the way in, mid-sentence.
   const want = (pages[0]?.[0].start ?? 0) + ((pages.at(-1)?.at(-1)?.end ?? 0) - (pages[0]?.[0].start ?? 0)) * 0.33;
   const page = pages.filter((p) => p.length >= Math.min(2, CAPTION_STYLES[o.style].maxWords)).sort((p, q) => Math.abs(p[0].start - want) - Math.abs(q[0].start - want))[0] ?? pages[0];
@@ -823,10 +824,10 @@ const withDefaults = (o: CaptionOptions): CaptionOptions => ({ ...o, size: o.siz
 export async function burnCaptions(video: string, opts: CaptionOptions, output: string): Promise<CaptionResult> {
   const o = withDefaults(opts);
   const info = await probe(video);
-  const { transcript, words } = await timedWords(video, o);
+  const { transcript, words, exact } = await timedWords(video, o);
   const lang = transcript.language;
   const sep = joiner(lang);
-  const { pages, states } = layout(words, o.style, info.width, info.height, o.size, lettersOf(o), o.lead ?? LEAD, lang);
+  const { pages, states } = layout(words, o.style, info.width, info.height, o.size, lettersOf(o), o.lead ?? LEAD, lang, exact);
   if (!states.length) throw new Error("There are no words to put on screen.");
 
   const work = mkdtempSync(join(tmpdir(), "flow-captions-"));
@@ -834,7 +835,10 @@ export async function burnCaptions(video: string, opts: CaptionOptions, output: 
     // Draw every distinct caption once, as a transparent picture the size of the video.
     const files = new Map<string, string>();
     await withPage(info.width, info.height, pageHtml(o.style, { ...info, position: o.position, size: o.size, color: pickColor(o), letters: lettersOf(o), lang, names: namesIn(words, o.names) }), async (p) => {
+      // The blank frame hides the caption box itself: boxed draws its dark band even around no words.
+      await p.evaluate(() => { (document.querySelector(".cap") as HTMLElement).style.visibility = "hidden"; });
       await p.screenshot({ path: join(work, "blank.png"), omitBackground: true });
+      await p.evaluate(() => { (document.querySelector(".cap") as HTMLElement).style.visibility = ""; });
       for (const s of states) {
         const id = JSON.stringify([s.words, s.active, s.scale]);
         if (files.has(id)) continue;
