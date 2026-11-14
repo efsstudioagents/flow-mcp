@@ -87,7 +87,7 @@ const text = (v: unknown) => (typeof v === "string" ? v.trim() : typeof v === "n
 const url = (v: unknown) => { const s = text(Array.isArray(v) ? v[0] : v); return s && /^https?:\/\//.test(s) ? s : undefined; };
 
 export interface Product { title?: string; price?: number; originalPrice?: number; discount?: number; sold?: number; rating?: number; shop?: string; image?: string; url?: string; revenue?: number; currency?: string }
-export interface Video { description?: string; author?: string; plays?: number; likes?: number; comments?: number; shares?: number; duration?: number; cover?: string; url?: string; date?: string }
+export interface Video { description?: string; author?: string; language?: string; plays?: number; likes?: number; comments?: number; shares?: number; duration?: number; cover?: string; url?: string; date?: string }
 
 export function normProduct(r: Obj): Product {
   const price = num(first(r, ["price", "salePrice", "price.sale", "price.min", "priceMin", "minPrice", "price.salePrice", "price.value", "realPrice", "preco"]));
@@ -116,6 +116,7 @@ export function normVideo(r: Obj): Video {
   return {
     description: text(first(r, ["description", "text", "desc", "title"])),
     author: text(first(r, ["author", "authorMeta.name", "authorMeta.nickName", "author.uniqueId", "username"])),
+    language: text(first(r, ["language", "textLanguage"])),
     plays: num(first(r, ["plays", "playCount", "stats.playCount", "views"])),
     likes: num(first(r, ["likes", "diggCount", "stats.diggCount", "likeCount"])),
     comments: num(first(r, ["comments", "commentCount", "stats.commentCount"])),
@@ -166,7 +167,9 @@ function actorInput(mode: Mode, query: string, limit: number) {
   if (mode === "products") return { keywords: [query], region: "BR", includeDetails: false, includeReviews: false, includeSalesTrend: false, maxProductsPerKeyword: limit, maxItems: limit };
   // A query starting with # searches the hashtag; anything else is a video search. No paid add-ons are switched on.
   const tag = query.match(/^#(\S+)$/)?.[1];
-  return tag ? { hashtags: [tag], resultsPerPage: limit } : { searchQueries: [query], searchSection: "/video", resultsPerPage: limit };
+  // proxyCountryCode BR: TikTok answers as it would to someone in Brazil. Without it the search runs from a US server
+  // and comes back mostly in English (13/11: a "vestido" search returned wedding dresses from the US).
+  return tag ? { hashtags: [tag], resultsPerPage: limit, proxyCountryCode: "BR" } : { searchQueries: [query], searchSection: "/video", resultsPerPage: limit, proxyCountryCode: "BR" };
 }
 // An answer that means "this account cannot pay for it" (no credit, monthly limit reached, key refused): the next key
 // may still work. Anything else (a timeout, a bad input, a server error) is not retried on another account, since a
@@ -268,8 +271,10 @@ export async function handleResearch(req: IncomingMessage, res: ServerResponse, 
     usageCache = null;
     if (!rows || !used) throw new Error(`Nenhuma conta do Apify conseguiu fazer a busca (${refused.join("; ")}).`);
     const cost_usd = await lastRunCost(used.token);
-    const saved: Saved = { mode, query, region: mode === "products" ? "BR" : undefined, source: `apify:${ACTORS[mode].replace("~", "/")}`, account: used.label, created: new Date().toISOString(), count: 0, items: [] };
+    const saved: Saved = { mode, query, region: "BR", source: `apify:${ACTORS[mode].replace("~", "/")}`, account: used.label, created: new Date().toISOString(), count: 0, items: [] };
     saved.items = rows.map((r) => (mode === "videos" ? normVideo(r) : normProduct(r)));
+    // Videos in Portuguese first; the rest stay, after them.
+    if (mode === "videos") saved.items.sort((a, b) => Number((b as Video).language === "pt") - Number((a as Video).language === "pt"));
     saved.count = saved.items.length;
     mkdirSync(RESEARCH_DIR, { recursive: true });
     const file = fileFor(mode, query);
