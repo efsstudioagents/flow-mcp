@@ -682,7 +682,8 @@ dialog h2{font-size:24px}
             <input type="number" id="r_limit" min="1" max="50" value="20" aria-label="Quantos resultados (até 50)" title="Quantos resultados (até 50)">
             <button type="button" class="btn" id="r_go">Buscar</button>
           </div>
-          <div id="r_acctWrap" hidden><label class="f" for="r_acct">Conta do Apify</label><select id="r_acct"></select></div>
+          <div class="grid2"><div id="r_ctryWrap" hidden><label class="f" for="r_ctry">País</label><select id="r_ctry"></select></div>
+          <div id="r_acctWrap" hidden><label class="f" for="r_acct">Conta do Apify</label><select id="r_acct"></select></div></div>
           <p class="empty" id="r_tok" style="margin-top:10px"></p>
         </div>
         <h3>Buscas salvas <small id="r_count"></small></h3>
@@ -760,7 +761,8 @@ const S = Object.assign(structuredClone(DEFAULTS), JSON.parse(localStorage.getIt
 const save = () => localStorage.setItem("flow-studio-v2", JSON.stringify(S));
 // Abas novas: filtros dos prompts, modo da pesquisa e quais jobs vieram de um prompt da biblioteca (para o exemplo).
 S.prompts = { sort: "recent", orient: "all", cat: "all", ...(S.prompts ?? {}) };
-S.research = { mode: "products", limit: 20, file: null, sort: {}, ...(S.research ?? {}) };
+S.research = { mode: "products", limit: 20, file: null, sort: {}, country_products: "BR", country_videos: "BR", ...(S.research ?? {}) };
+const COUNTRY_NAMES = {BR:"Brasil",US:"Estados Unidos",GB:"Reino Unido",PT:"Portugal",ES:"Espanha",MX:"México",AR:"Argentina",FR:"França",IT:"Itália",DE:"Alemanha",CA:"Canadá",AU:"Austrália",JP:"Japão",KR:"Coreia do Sul"};
 S.promptJobs ??= {};
 if (!["kokoro", "gemini"].includes(S.narrate.engine)) S.narrate.engine = "kokoro"; // the computer-voice engine is gone
 let TECH = [], VOICES = { kokoro: [], gemini: [] }, CAST = [], LIB = [], GAL = [], castImage = null, pickTarget = null, busy = false;
@@ -2094,7 +2096,13 @@ async function loadResearch() {
 function renderResearch() {
   const rs = S.research, prod = rs.mode === "products";
   $("#r_mode").innerHTML = `<button type="button" data-rmode="products" class="${prod ? "on" : ""}">Produtos · TikTok Shop</button><button type="button" data-rmode="videos" class="${prod ? "" : "on"}">Vídeos · TikTok</button>`;
-  $("#r_qlabel").textContent = prod ? "Palavra-chave (TikTok Shop Brasil)" : "Palavra-chave ou #hashtag";
+  // País: a lista vem do servidor (produtos só nos mercados em que a busca lê a loja local). Um servidor antigo não manda: fica Brasil.
+  const ctryList = R.status?.countries?.[prod ? "products" : "videos"] ?? [];
+  const ctryKey = prod ? "country_products" : "country_videos";
+  if (!ctryList.includes(S.research[ctryKey])) S.research[ctryKey] = "BR";
+  $("#r_ctryWrap").hidden = ctryList.length < 1;
+  $("#r_ctry").innerHTML = ctryList.map((c) => `<option value="${c}"${c === S.research[ctryKey] ? " selected" : ""}>${COUNTRY_NAMES[c] ?? c}</option>`).join("");
+  $("#r_qlabel").textContent = prod ? `Palavra-chave (TikTok Shop ${COUNTRY_NAMES[S.research[ctryKey]] ?? "Brasil"})` : "Palavra-chave ou #hashtag";
   $("#r_q").placeholder = prod ? "vestido feminino" : "provador de roupa ou #tiktokshop";
   $("#r_limit").max = R.status?.limit?.max ?? 50;
   const has = Boolean(R.status?.has_token);
@@ -2116,7 +2124,7 @@ function renderResearch() {
   $("#r_count").textContent = saved.length ? `${saved.length} salvas` : "";
   $("#r_saved").innerHTML = saved.map((s) => {
     const d = s.created ? new Date(s.created).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }) : "";
-    return `<button type="button" data-rfile="${esc(s.file)}" class="${R.cur?.file === s.file ? "cur" : ""}"><span>${s.mode === "videos" ? "Vídeos" : "Produtos"} · ${esc(s.query)}</span><em>${s.broken ? "arquivo com erro" : `${s.count} itens`}${d ? ` · ${d}` : ""}</em></button>`;
+    return `<button type="button" data-rfile="${esc(s.file)}" class="${R.cur?.file === s.file ? "cur" : ""}"><span>${s.mode === "videos" ? "Vídeos" : "Produtos"} · ${esc(s.query)}${s.region && s.region !== "BR" ? ` · ${esc(COUNTRY_NAMES[s.region] ?? s.region)}` : ""}</span><em>${s.broken ? "arquivo com erro" : `${s.count} itens`}${d ? ` · ${d}` : ""}</em></button>`;
   }).join("") || `<p class="empty" style="padding:4px 2px">${R.err ? "As buscas salvas aparecem aqui depois de ativar." : `Nenhuma busca salva ainda. Elas ficam em ${esc(R.status?.folder ?? "flow-mcp-out/pesquisas")}.`}</p>`;
   renderResults();
 }
@@ -2175,6 +2183,7 @@ $("#r_mode").addEventListener("click", (e) => { const b = e.target.closest("[dat
 $("#r_saved").addEventListener("click", (e) => { const b = e.target.closest("[data-rfile]"); if (b) openSearch(b.dataset.rfile); });
 $("#r_sort").addEventListener("change", (e) => { if (!R.cur) return; (S.research.sort ??= {})[R.cur.mode] = e.target.value; save(); renderResults(); });
 $("#r_acct").addEventListener("change", (e) => { S.research.account = Number(e.target.value); save(); });
+$("#r_ctry").addEventListener("change", (e) => { S.research[S.research.mode === "products" ? "country_products" : "country_videos"] = e.target.value; save(); renderResearch(); });
 $("#r_limit").addEventListener("change", (e) => { S.research.limit = Math.max(1, Math.min(50, Math.round(+e.target.value || 20))); e.target.value = S.research.limit; save(); });
 $("#r_q").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("#r_go").disabled) $("#r_go").click(); });
 $("#r_go").onclick = async () => {
@@ -2185,7 +2194,8 @@ $("#r_go").onclick = async () => {
   if (!confirm(`Buscar “${query}” no Apify (${limit} ${mode === "products" ? "produtos" : "vídeos"})?\n\nCusta cerca de US$ ${usd.toFixed(2)} do saldo da sua conta do Apify.`)) return;
   const b = $("#r_go"); b.disabled = true; b.textContent = "Buscando… (até 4 min)";
   try {
-    const out = await xapi("research/run", { mode, query, limit, ...(S.research.account ? { account: S.research.account } : {}) });
+    const country = S.research[mode === "products" ? "country_products" : "country_videos"] || "BR";
+    const out = await xapi("research/run", { mode, query, limit, country, ...(S.research.account ? { account: S.research.account } : {}) });
     R.cur = out; S.research.file = out.file; save();
     const cost = typeof out.cost_usd === "number" ? ` · custou US$ ${out.cost_usd.toLocaleString("pt-BR", { maximumFractionDigits: 3 })}` : "";
     toast(`${out.count} resultado(s) salvos${out.account ? ` · conta ${out.account}` : ""}${cost}${out.skipped_accounts?.length ? ` (pulou: ${out.skipped_accounts.join("; ")})` : ""}`);

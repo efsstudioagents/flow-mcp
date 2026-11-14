@@ -154,7 +154,7 @@ function listSaved() {
       const full = join(RESEARCH_DIR, file);
       try {
         const s = normaliseFile(JSON.parse(readFileSync(full, "utf8")), file);
-        return { file, mode: s.mode, query: s.query, created: s.created, count: s.count, source: s.source, mtime: statSync(full).mtimeMs };
+        return { file, mode: s.mode, query: s.query, region: s.region, created: s.created, count: s.count, source: s.source, mtime: statSync(full).mtimeMs };
       } catch {
         return { file, mode: "products" as Mode, query: file, created: "", count: 0, broken: true, mtime: statSync(full).mtimeMs };
       }
@@ -163,26 +163,35 @@ function listSaved() {
 }
 
 /* ---------- Apify ---------- */
-function actorInput(mode: Mode, query: string, limit: number) {
-  if (mode === "products") return { keywords: [query], region: "BR", includeDetails: false, includeReviews: false, includeSalesTrend: false, maxProductsPerKeyword: limit, maxItems: limit };
+// Countries the panel offers. Products: markets whose TikTok Shop keyword search reads the local shop (memo23 actor).
+// Videos: any country works through the proxy; this list is the useful subset.
+export const PRODUCT_COUNTRIES = ["BR", "US", "GB", "FR", "DE", "ES", "IT", "MX", "JP"] as const;
+export const VIDEO_COUNTRIES = ["BR", "US", "GB", "PT", "ES", "MX", "AR", "FR", "IT", "DE", "CA", "AU", "JP", "KR"] as const;
+export function pickCountry(mode: Mode, c: unknown): string {
+  const list: readonly string[] = mode === "products" ? PRODUCT_COUNTRIES : VIDEO_COUNTRIES;
+  const v = String(c ?? "").toUpperCase();
+  return list.includes(v) ? v : "BR";
+}
+function actorInput(mode: Mode, query: string, limit: number, country = "BR") {
+  if (mode === "products") return { keywords: [query], region: country, includeDetails: false, includeReviews: false, includeSalesTrend: false, maxProductsPerKeyword: limit, maxItems: limit };
   // A query starting with # searches the hashtag; anything else is a video search. No paid add-ons are switched on.
   const tag = query.match(/^#(\S+)$/)?.[1];
   // proxyCountryCode BR: TikTok answers as it would to someone in Brazil. Without it the search runs from a US server
   // and comes back mostly in English (13/11: a "vestido" search returned wedding dresses from the US).
-  return tag ? { hashtags: [tag], resultsPerPage: limit, proxyCountryCode: "BR" } : { searchQueries: [query], searchSection: "/video", resultsPerPage: limit, proxyCountryCode: "BR" };
+  return tag ? { hashtags: [tag], resultsPerPage: limit, proxyCountryCode: country } : { searchQueries: [query], searchSection: "/video", resultsPerPage: limit, proxyCountryCode: country };
 }
 // An answer that means "this account cannot pay for it" (no credit, monthly limit reached, key refused): the next key
 // may still work. Anything else (a timeout, a bad input, a server error) is not retried on another account, since a
 // run may already have started and cost money.
 class AccountRefused extends Error {}
 
-async function runActor(mode: Mode, query: string, limit: number, token: string): Promise<Obj[]> {
+async function runActor(mode: Mode, query: string, limit: number, token: string, country = "BR"): Promise<Obj[]> {
   const qs = new URLSearchParams({ timeout: "240", clean: "true", format: "json", limit: String(limit), maxItems: String(limit) });
   // The key goes in a header, never in the address, so it cannot end up in any log.
   const res = await fetch(`https://api.apify.com/v2/acts/${ACTORS[mode]}/run-sync-get-dataset-items?${qs}`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify(actorInput(mode, query, limit)),
+    body: JSON.stringify(actorInput(mode, query, limit, country)),
     signal: AbortSignal.timeout(270_000),
   }).catch((err: Error) => { throw new Error(err.name === "TimeoutError" ? "O Apify demorou mais de 4 minutos. Tente de novo com menos itens." : `Sem conexão com o Apify: ${err.message}`); });
   const body = await res.text();
@@ -234,7 +243,7 @@ export async function handleResearch(req: IncomingMessage, res: ServerResponse, 
   const b = req.method === "POST" ? await bodyJson(req) : {};
   if (m[1] === "status") {
     const accounts = await accountsView(b.fresh === true);
-    sendJson(res, 200, { has_token: accounts.length > 0, accounts, folder: RESEARCH_DIR, searches: listSaved(), limit: { default: DEFAULT_LIMIT, max: MAX_LIMIT } });
+    sendJson(res, 200, { has_token: accounts.length > 0, accounts, folder: RESEARCH_DIR, searches: listSaved(), limit: { default: DEFAULT_LIMIT, max: MAX_LIMIT }, countries: { products: PRODUCT_COUNTRIES, videos: VIDEO_COUNTRIES } });
     return true;
   }
   if (m[1] === "load") {
@@ -252,6 +261,7 @@ export async function handleResearch(req: IncomingMessage, res: ServerResponse, 
     const query = str(b.query, 120)?.trim();
     if (!query) throw new Error("Escreva o que buscar.");
     const limit = Math.max(1, Math.min(MAX_LIMIT, Math.round(Number(b.limit) || DEFAULT_LIMIT)));
+    const country = pickCountry(mode, b.country);
     // The chosen account goes first; the others follow only when Apify says that one cannot pay for the run.
     const chosen = Number(b.account);
     const order = [...keys.filter((k) => k.slot === chosen), ...keys.filter((k) => k.slot !== chosen)];
@@ -260,7 +270,7 @@ export async function handleResearch(req: IncomingMessage, res: ServerResponse, 
     let used: ApifyKey | undefined;
     for (const key of order) {
       try {
-        rows = (await runActor(mode, query, limit, key.token)).slice(0, limit);
+        rows = (await runActor(mode, query, limit, key.token, country)).slice(0, limit);
         used = key;
         break;
       } catch (err) {
@@ -271,10 +281,11 @@ export async function handleResearch(req: IncomingMessage, res: ServerResponse, 
     usageCache = null;
     if (!rows || !used) throw new Error(`Nenhuma conta do Apify conseguiu fazer a busca (${refused.join("; ")}).`);
     const cost_usd = await lastRunCost(used.token);
-    const saved: Saved = { mode, query, region: "BR", source: `apify:${ACTORS[mode].replace("~", "/")}`, account: used.label, created: new Date().toISOString(), count: 0, items: [] };
+    const saved: Saved = { mode, query, region: country, source: `apify:${ACTORS[mode].replace("~", "/")}`, account: used.label, created: new Date().toISOString(), count: 0, items: [] };
     saved.items = rows.map((r) => (mode === "videos" ? normVideo(r) : normProduct(r)));
     // Videos in Portuguese first; the rest stay, after them.
-    if (mode === "videos") saved.items.sort((a, b) => Number((b as Video).language === "pt") - Number((a as Video).language === "pt"));
+    // Brazil and Portugal: videos in Portuguese first; the rest stay, after them.
+    if (mode === "videos" && (country === "BR" || country === "PT")) saved.items.sort((a, b) => Number((b as Video).language === "pt") - Number((a as Video).language === "pt"));
     saved.count = saved.items.length;
     mkdirSync(RESEARCH_DIR, { recursive: true });
     const file = fileFor(mode, query);
