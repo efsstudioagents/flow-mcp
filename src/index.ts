@@ -2,13 +2,22 @@
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { LocalCore, shapes, type Core } from "./core.js";
+import { LocalCore, shapes, strictInputs, type Core } from "./core.js";
 import { PLAYBOOK } from "./playbook.js";
 import { RemoteCore } from "./remote.js";
-import { PORT, startServer } from "./server.js";
+import { PORT, startServer, type ServerRole } from "./server.js";
+import { ensureStudio, probeStudio } from "./supervise.js";
 
 const local = new LocalCore();
-const role = await startServer(local);
+// When nothing listens on the port, start a standalone Flow Studio and be its client, instead of owning the Flow tab
+// and queue here: an owner MCP process takes its queue (and any scheduled job) down with the Claude session.
+// FLOW_MCP_AUTOSTUDIO=0 keeps the old behaviour. Anything other than a free port goes the old way too.
+let role: ServerRole;
+if (process.env.FLOW_MCP_AUTOSTUDIO !== "0" && (await probeStudio()) === "down" && (await ensureStudio())) role = "client";
+else role = await startServer(local);
+// Only a process that bound the port restores and saves the queue file: binding is atomic, so there is one at a time.
+// Role "none" (an unrelated program holds the port) may be several processes at once and must never restore it.
+if (role === "owner") local.restoreQueue(PORT);
 const core: Core = role === "client" ? new RemoteCore() : local;
 const studio = role === "none" ? undefined : `http://127.0.0.1:${PORT}`;
 
@@ -102,7 +111,7 @@ server.registerTool(
     title: "Queue Flow generations",
     description:
       "Queue one clip or image per scene in the open Flow project. Runs one at a time with human-like pauses and spends the user's Google AI credits (approx. per video: Omni 1.1 Flash 7-12, Veo 3.1 Lite 10, Fast 20, Quality 100; images 0). Each scene is checked against max_credits using Flow's own quote before anything is spent. Returns job ids immediately; use flow_wait for results.",
-    inputSchema: shapes.generate,
+    inputSchema: strictInputs.generate,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   (args) => reply(core.generate(args)),
@@ -171,7 +180,7 @@ server.registerTool(
     title: "Fast image batch via Flow's agent",
     description:
       "Hand up to 50 image scenes to Flow's own Agent mode, which renders them all in parallel (minutes for a whole batch instead of one paced job per scene) and enriches each prompt itself. Images only, 0 credits. Pass `references` (characters, places, objects, each with a short name) to attach them once in the agent's composer, the way its + button does, and `scene_references` to say which scenes use which, so a whole story stays on-model. Scenes the agent drops are asked for again, then made one by one with their references. Less exact than flow_generate: the agent picks the wording, no techniques, and each image is matched back to its scene by its stored prompt. Returns a job id; use flow_wait.",
-    inputSchema: shapes.agent,
+    inputSchema: strictInputs.agent,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   (args) => reply(core.agent(args)),

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
@@ -77,6 +77,36 @@ export function extractZip(zip: string, dest: string): string[] {
   walk(dest);
   return files;
 }
+
+// Keeps the Mac awake while the queue has work (scheduled jobs included), with the same caffeinate flags proven by hand
+// on 2026-11-13: -d display, -i idle, -m disk, -s system sleep (on AC only), -w <pid> so it ends with this process.
+// Not covered: battery (-s does nothing there) and a closed lid, which sleeps the Mac unless it runs in clamshell mode
+// with external display and power; changing that needs pmset, which is the user's call. FLOW_MCP_AWAKE=0 turns this off,
+// FLOW_MCP_AWAKE_DISPLAY=0 lets the display sleep (Flow with the display asleep is untested). No-op off a Mac.
+let awake: ChildProcess | null = null;
+
+export function keepAwake(on: boolean): void {
+  if (!IS_MAC || process.env.FLOW_MCP_AWAKE === "0") return;
+  if (on && !awake) {
+    const flags = [...(process.env.FLOW_MCP_AWAKE_DISPLAY === "0" ? [] : ["-d"]), "-i", "-m", "-s", "-w", String(process.pid)];
+    try {
+      const child = spawn("/usr/bin/caffeinate", flags, { stdio: "ignore" });
+      const gone = () => {
+        if (awake === child) awake = null;
+      };
+      child.on("error", gone);
+      child.on("exit", gone);
+      awake = child;
+    } catch {
+      awake = null;
+    }
+  } else if (!on && awake) {
+    awake.kill();
+    awake = null;
+  }
+}
+
+export const isAwake = (): boolean => awake !== null;
 
 // Opens a page in the default browser.
 export function openUrl(url: string): void {

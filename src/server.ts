@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { CACHE_DIR as CAPTIONS_DIR } from "./captions.js";
 import { HOME_DIR } from "./chrome.js";
-import { OUTPUT_ROOT, shapes, type Core } from "./core.js";
+import { inputError, OUTPUT_ROOT, shapes, strictInputs, type Core } from "./core.js";
+// Add-on routes kept in their own files (prompt library, Apify research) so changes there never touch this file.
+import { handlePrompts } from "./prompts.js";
+import { handleResearch } from "./research.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
 export const TOKEN_FILE = join(HOME_DIR, "token");
@@ -92,16 +95,21 @@ export async function startServer(core: Core): Promise<ServerRole> {
         return json(res, 200, { path });
       }
 
+      // Add-on routes: /api/prompts[/…] and /api/research/… (each returns true when it answered).
+      if ((await handlePrompts(req, res, url)) || (await handleResearch(req, res, url))) return;
+
       const method = url.pathname.match(/^\/api\/(\w+)$/)?.[1] as keyof Core | undefined;
       if (req.method === "POST" && method && typeof core[method] === "function") {
         const raw = (await readBody(req, 1024 * 1024)).toString() || "{}";
         const shape = (shapes as Record<string, z.ZodRawShape>)[method];
-        const args = shape ? z.object(shape).parse(JSON.parse(raw)) : undefined;
+        // generate/agent are strict: a misspelt schedule field is an error, never silently dropped.
+        const schema = (strictInputs as Record<string, z.ZodType>)[method] ?? (shape ? z.object(shape) : undefined);
+        const args = schema ? schema.parse(JSON.parse(raw)) : undefined;
         return json(res, 200, await (core[method] as (a: unknown) => Promise<unknown>)(args));
       }
       json(res, 404, { error: "Not found." });
     } catch (err) {
-      const message = err instanceof z.ZodError ? err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : err instanceof Error ? err.message : String(err);
+      const message = err instanceof z.ZodError ? inputError(err) : err instanceof Error ? err.message : String(err);
       json(res, 400, { error: message });
     }
   });

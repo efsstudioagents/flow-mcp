@@ -95,6 +95,14 @@ export async function getFlowPage(): Promise<Page> {
   return page;
 }
 
+// The Flow tab's address, read without launching Chrome, opening a tab or reloading anything (getFlowPage may do all
+// three). undefined when Chrome is not up or shows no Flow tab.
+export async function peekFlowUrl(): Promise<string | undefined> {
+  if (!browser?.isConnected() && !(await cdpUp())) return undefined;
+  const b = await getBrowser();
+  return b.contexts()[0]?.pages().find((p) => FLOW_HOSTS.test(p.url()))?.url();
+}
+
 // Reloads Flow in English when it is showing in another language (a page the user opened by hand, or Flow redirecting
 // to an address without hl). Sign-in pages are left alone.
 export async function ensureEnglish(page: Page): Promise<void> {

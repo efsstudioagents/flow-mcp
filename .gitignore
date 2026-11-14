@@ -1,2 +1,6 @@
 node_modules
 dist
+.env
+prompts/library.json
+prompts/nespol-examples.json
+prompts/meus.json

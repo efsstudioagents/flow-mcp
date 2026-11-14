@@ -342,7 +342,8 @@ The preview tool could not read the project while it lived in ~/Desktop; check t
   flow_wait (job_ids may hold task ids) collects it; flow_wait itself returns within 40 s; flow_status lists
   `slow_calls`. Verified: a 3 s limit on flow_characters -> task id at 3.0 s, collected by flow_wait 1 s later.
 - TESTING NEW CODE WITHOUT TOUCHING CLAUDE'S PROCESS: start `dist/index.js` from an MCP client script with
-  FLOW_MCP_PORT=8799 and FLOW_MCP_HOME=<scratch dir>. Never reuse the real home for that: a process that owns a port
+  FLOW_MCP_PORT=8799, FLOW_MCP_HOME=<scratch dir> and FLOW_MCP_AUTOSTUDIO=0 (without it, since 2026-11-13, index.js finds
+  8799 free and starts a DETACHED Studio there that outlives the test and attaches to the real Chrome). Never reuse the real home for that: a process that owns a port
   writes a fresh token to HOME/token, which locks every client of the real owner out (401). Symlink characters.json into
   the scratch home when looks must persist. Give the client a 60 s request timeout so the app's limit is reproduced.
 - FLOW IN ENGLISH (2026-10-13): every driver step finds a button by its ENGLISH accessible name (~45 labels), so a
@@ -700,3 +701,22 @@ The preview tool could not read the project while it lived in ~/Desktop; check t
   `end_hold` {seconds, fade} holds the last frame and fades the picture to black (music_curve fades the sound with it). Checked on The Last Delivery: 103.75 s, -14.4 LUFS.
   The speech check hears "deliveries stopped" as "delivery stopped" on both Tyra and Kokoro: it is the listener, not the voice. Pass the real words as `text` to burnCaptions.
 
+- SCHEDULING HARDENED (2026-11-13, review fixes, all verified live with free images): generate/agent inputs are STRICT
+  (HTTP and MCP): a misspelt `start_time` is an error naming the key, never a paid job starting now; other tools still
+  accept extra keys. `~/.flow-mcp/config.json` `{"avoid_accounts":[4]}` (created with [4] when missing, re-read every
+  check; FLOW_MCP_AVOID_ACCOUNTS overrides; unreadable = nothing queues) is enforced at queue time (open_project, the
+  pinned tab, unpinned jobs) AND in the runner right before any job touches Flow (unknown account = fail). Account 4 =
+  efsstudiodigital, Erick's standing rule. queue.json has an owner lock `queue.lock` (pid; stale when the pid is dead):
+  a second owner on another port neither restores nor runs saved jobs. exclusive() lets go after 90 s
+  (FLOW_MCP_HOLD_MAX_S; accounts with credits 120 s, panels stop at 90 s). generate/agent/edit/continue/retry plan
+  pins one call at a time. studio.ts exits 1 on uncaughtException or 10 unhandled rejections in a minute (the next MCP
+  call spawns a fresh one; a running job restores as failed). ensureStudio never spawns with FLOW_MCP_AUTOSTUDIO=0.
+- ACCOUNT PANEL WORDING (mapped live 2026-11-13, read-only): the balance link is "891 Google Flow credits" but
+  "1 Google Flow credit" (singular - the old /credits/ regex missed it). Free accounts: "Credits refresh daily at
+  11:25 PM"; PRO (u/0, u/1): tier chip "PRO" on the Account details button and "Resets Dec 2 at 11:34 PM" (monthly,
+  parsed to the next such date). Free accounts have an empty tier chip -> plan "free".
+- APIFY KEYS (2026-11-13): APIFY_TOKEN, APIFY_TOKEN_2 ... _5 with labels APIFY_TOKEN_NAME, APIFY_TOKEN_2_NAME in .env.
+  research/status returns labels + monthly usage (GET /v2/users/me/limits), never a key. A search starts with the chosen
+  account and moves to the next only on 401/402/403 or a limit/quota message. Real runs (5 items asked): memo23 TikTok
+  Shop "vestido" BR returned 4 rows, US$ 0.022; clockworks tiktok-scraper "vestido" 5 rows, US$ 0.0195 (results not
+  Brazil-focused: scrape-as-in-country is a paid add-on, left off). usageTotalUsd lags a few seconds after the run.

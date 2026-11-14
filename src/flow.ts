@@ -3,9 +3,10 @@ import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { createHash } from "node:crypto";
 import type { Locator, Page } from "playwright-core";
-import { HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
+import { HOME_DIR, getFlowPage, inEnglish, peekFlowUrl } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { extractZip } from "./platform.js";
+import { avoidAccounts, refuseAvoidedAccount } from "./config.js";
 
 export interface FlowState {
   url: string;
@@ -92,7 +93,8 @@ async function readCredits(page: Page): Promise<number | undefined> {
   await dismissOverlays(page);
   await scrollToTop(page);
   await page.getByRole("button", { name: "Account details" }).click({ timeout: 5000 });
-  const link = page.getByRole("link", { name: /Google Flow credits/ });
+  // "891 Google Flow credits", but "1 Google Flow credit" (singular) on a balance of one.
+  const link = page.getByRole("link", { name: /Google Flow credits?$/ });
   try {
     await link.waitFor({ state: "visible", timeout: 5000 });
     const n = Number((await link.innerText()).replace(/[^\d]/g, ""));
@@ -2001,20 +2003,114 @@ export async function runAgentBatch(job: Job): Promise<string[]> {
 // A fresh Flow project, so a film can start from scratch without anyone clicking. Mapped live (2026-10-30): Flow's home
 // page has one button "New project", which opens /project/<uuid>; on the project page the name is a text box whose
 // accessible name is "Editable text" (it holds Flow's default name, e.g. "Oct 29 - 22:17").
-export interface FlowAccount { index: number; email: string; name: string; projects: { id: string; title: string; url: string }[] }
+export interface FlowAccount {
+  index: number;
+  email: string;
+  name: string;
+  projects: { id: string; title: string; url: string }[];
+  // From the account panel: read when asked (credits: true), otherwise the last reading this process made, if any.
+  plan?: string; // first line of the "Account details" button ("PRO", "PLUS"...); "free" when it is empty
+  credits?: number;
+  credits_refresh?: string; // the panel's own line, word for word, e.g. "Credits refresh daily at 11:25 PM"
+  next_refresh?: string; // ISO, only when that line is the daily form
+  credits_read_at?: string;
+  credits_error?: string;
+}
+
+type Reading = Required<Pick<FlowAccount, "credits_read_at">> & Pick<FlowAccount, "plan" | "credits" | "credits_refresh"> & { email: string };
+// Last panel reading per account index, kept with its email so a re-signed account never shows someone else's balance.
+const lastReadings = new Map<number, Reading>();
+
+// The panel's refresh line -> the next such moment (ISO), this computer's time. Two wordings, mapped live 2026-11-13:
+// free accounts "Credits refresh daily at 11:25 PM"; PRO accounts "Resets Dec 2 at 11:34 PM" (monthly, a date with no
+// year: the next Dec 2 from now). Anything else stays raw with no date, since a guessed date is worse than none.
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+export function parseRefresh(text: string, now = new Date()): string | undefined {
+  const clock = (h12: number, min: number, ampm: string) => (h12 < 1 || h12 > 12 || min > 59 ? undefined : (h12 % 12) + (/pm/i.test(ampm) ? 12 : 0));
+  const daily = text.match(/daily at (\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (daily) {
+    const h = clock(Number(daily[1]), Number(daily[2]), daily[3]);
+    if (h === undefined) return undefined;
+    const d = new Date(now);
+    d.setHours(h, Number(daily[2]), 0, 0);
+    if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
+    return d.toISOString();
+  }
+  const monthly = text.match(/resets\s+([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+at\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (monthly) {
+    const month = MONTHS.indexOf(monthly[1].toLowerCase());
+    const day = Number(monthly[2]);
+    const h = clock(Number(monthly[3]), Number(monthly[4]), monthly[5]);
+    if (month < 0 || h === undefined || day < 1 || day > 31) return undefined;
+    for (const year of [now.getFullYear(), now.getFullYear() + 1]) {
+      const d = new Date(year, month, day, h, Number(monthly[4]), 0, 0);
+      if (d.getMonth() !== month) return undefined; // Feb 30 and the like
+      if (d.getTime() > now.getTime()) return d.toISOString();
+    }
+  }
+  return undefined;
+}
+
+// Plan, balance and refresh line of the account on this (throwaway) tab. The account panel also holds "Sign out", so the
+// ONLY click is the one that opens it; the tab navigates away or closes next, so the panel is never closed and nothing
+// inside it is touched. Never throws: a failure comes back as `error`.
+async function readAccountPanel(page: Page): Promise<{ plan?: string; credits?: number; refresh?: string; error?: string }> {
+  const out: { plan?: string; credits?: number; refresh?: string; error?: string } = {};
+  try {
+    const button = page.getByRole("button", { name: "Account details" }).filter({ visible: true }).first();
+    await button.waitFor({ state: "visible", timeout: 10_000 });
+    out.plan = (await button.innerText().catch(() => "")).trim().split("\n")[0].trim() || "free";
+    await button.click({ timeout: 5000 });
+    // "891 Google Flow credits", but "1 Google Flow credit" (singular) on a balance of one.
+    const link = page.getByRole("link", { name: /Google Flow credits?$/ }).filter({ visible: true }).first();
+    await link.waitFor({ state: "visible", timeout: 5000 });
+    const digits = (await link.innerText()).replace(/[^\d]/g, "");
+    if (digits) out.credits = Number(digits);
+    // The refresh line sits near the balance; climb from the link (at most 8 levels) to the first text that has it.
+    out.refresh =
+      (await link
+        .evaluate((el) => {
+          let node: HTMLElement | null = el as HTMLElement;
+          for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
+            const line = (node.innerText || "").split("\n").map((l) => l.trim()).find((l) => /refresh|reset|renew/i.test(l));
+            if (line) return line;
+          }
+          return null;
+        })
+        .catch(() => null)) ?? undefined;
+    if (out.credits === undefined) out.error = "The account panel opened but showed no credit balance.";
+  } catch (err) {
+    out.error = `Could not read the account panel: ${err instanceof Error ? err.message.split("\n")[0] : err}`;
+  }
+  return out;
+}
 
 // Every Google account signed in to the Flow Chrome profile, with its Flow projects. Read in a separate tab so the
 // main Flow tab (and anything it is doing) is not touched. Flow sends an unknown /u/N/ back to /u/0/, which ends the list.
-export async function listAccounts(): Promise<FlowAccount[]> {
+// `only` reads just those indexes (skipping any that are not signed in); `credits` also opens each account's panel there.
+// Panel reads stop at `creditsDeadline` (epoch ms): the rest are listed with credits_error, so a long read never outlives
+// the queue hold it runs under. Accounts on the do-not-use list are listed (marked avoid) but their panel is not opened.
+export async function listAccounts(opts: { credits?: boolean; only?: number[]; creditsDeadline?: number } = {}): Promise<(FlowAccount & { avoid?: boolean })[]> {
+  let avoid: number[] = [];
+  try {
+    avoid = avoidAccounts();
+  } catch {
+    /* unreadable list: shown in status; reading balances is harmless */
+  }
   const main = await getFlowPage();
   const page = await main.context().newPage();
-  const out: FlowAccount[] = [];
+  const out: (FlowAccount & { avoid?: boolean })[] = [];
+  const picked = opts.only?.length ? [...new Set(opts.only)].sort((a, b) => a - b) : undefined;
+  const indexes = picked ?? [0, 1, 2, 3, 4, 5, 6, 7];
   try {
-    for (let index = 0; index < 8; index++) {
+    for (const index of indexes) {
       await page.goto(inEnglish(`https://flow.google.com/u/${index}/`), { waitUntil: "domcontentloaded" });
       await page.locator("flow-project-card").first().waitFor({ timeout: 12_000 }).catch(() => {});
       const shown = Number(page.url().match(/\/u\/(\d+)\//)?.[1] ?? 0);
-      if (shown !== index) break;
+      if (shown !== index) {
+        if (picked) continue;
+        break;
+      }
       const read = await page.evaluate(() => {
         const label = [...document.querySelectorAll("[aria-label]")].map((e) => e.getAttribute("aria-label") ?? "").find((l) => /^Google Account:/.test(l)) ?? "";
         const m = label.replace(/\s+/g, " ").match(/^Google Account: (.*?) \(([^)]+)\)/);
@@ -2025,23 +2121,127 @@ export async function listAccounts(): Promise<FlowAccount[]> {
         }).filter((x) => x.href);
         return { name: m?.[1] ?? "", email: m?.[2] ?? "", projects };
       });
-      if (!read.email) break;
-      out.push({
+      if (!read.email) {
+        if (picked) continue;
+        break;
+      }
+      const account: FlowAccount & { avoid?: boolean } = {
+        ...(avoid.includes(index) ? { avoid: true } : {}),
         index,
         email: read.email,
         name: read.name,
         projects: read.projects.map((x) => ({ id: x.href.match(/project\/([0-9a-f-]{36})/)?.[1] ?? "", title: x.title, url: `https://flow.google.com${x.href}` })),
-      });
+      };
+      if (opts.credits && avoid.includes(index)) {
+        account.credits_error = "Not read: this account is on the do-not-use list.";
+      } else if (opts.credits && opts.creditsDeadline !== undefined && Date.now() > opts.creditsDeadline) {
+        account.credits_error = "Not read: the reading ran out of time; reload to read the rest.";
+      } else if (opts.credits) {
+        const panel = await readAccountPanel(page);
+        const read_at = new Date().toISOString();
+        Object.assign(account, {
+          plan: panel.plan,
+          credits: panel.credits,
+          credits_refresh: panel.refresh,
+          next_refresh: panel.refresh ? parseRefresh(panel.refresh) : undefined,
+          credits_read_at: read_at,
+          credits_error: panel.error,
+        });
+        if (panel.credits !== undefined) lastReadings.set(index, { email: read.email, plan: panel.plan, credits: panel.credits, credits_refresh: panel.refresh, credits_read_at: read_at });
+      } else {
+        const last = lastReadings.get(index);
+        if (last && last.email === read.email) {
+          const { email: _, ...rest } = last;
+          Object.assign(account, rest, { next_refresh: last.credits_refresh ? parseRefresh(last.credits_refresh) : undefined });
+        }
+      }
+      out.push(account);
     }
   } finally {
     await page.close().catch(() => {});
+    // newPage() brought the throwaway tab to the front; give the Flow tab its place back.
+    await main.bringToFront().catch(() => {});
   }
   return out;
+}
+
+// A Flow project address split into account index (no /u/N/ means 0) and project id; `root` is the address up to the id.
+export function projectRoot(url: string): { root: string; index: number; id: string } | undefined {
+  const m = url.match(/^https:\/\/flow\.google\.com(?:\/u\/(\d+))?\/project\/([0-9a-f-]{36})(?=[/?#]|$)/);
+  return m ? { root: m[0], index: Number(m[1] ?? 0), id: m[2] } : undefined;
+}
+
+// Account index of any Flow address (no /u/N/ = 0); undefined for anything that is not flow.google.com.
+export function accountIndexOf(url: string): number | undefined {
+  const m = url.match(/^https:\/\/flow\.google\.com(?:\/u\/(\d+))?(?=[/?#]|$)/);
+  return m ? Number(m[1] ?? 0) : undefined;
+}
+
+// A peek that can hang (connectOverCDP has no timeout of its own) must never block planning, so it gives up after `ms`.
+async function peekUrl(ms = 5000): Promise<string | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<undefined>((r) => (timer = setTimeout(() => r(undefined), ms)));
+  try {
+    return await Promise.race([peekFlowUrl().catch(() => undefined), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// What the Flow tab shows right now, read without navigating: its project root (if a project) and account index.
+export async function currentTab(): Promise<{ url?: string; root?: string; account?: number }> {
+  const url = await peekUrl();
+  return url ? { url, root: projectRoot(url)?.root, account: accountIndexOf(url) } : {};
+}
+
+// The account index the Flow tab is on right now, read without navigating; undefined when unknown.
+export async function currentTabAccount(): Promise<number | undefined> {
+  const url = await peekUrl();
+  return url ? accountIndexOf(url) : undefined;
+}
+
+// Right before ANY job touches Flow: the tab must be on a known account that is not on the do-not-use list. Unknown
+// (no Flow tab, another host) fails closed, with nothing spent.
+export async function refuseAvoidedTab(): Promise<void> {
+  const list = avoidAccounts();
+  const page = await getFlowPage();
+  const index = accountIndexOf(page.url());
+  if (index === undefined) throw new Error(`The Flow window is on ${page.url()}, so its Google account is unknown. Open a project (flow_open_project) and retry. Nothing was generated.`);
+  refuseAvoidedAccount(index, list);
+}
+
+// The project the Flow tab is on right now (root address), read without navigating; undefined when unknown.
+export async function currentProjectRoot(): Promise<string | undefined> {
+  const url = await peekUrl();
+  return url ? projectRoot(url)?.root : undefined;
+}
+
+// Right before a pinned or scheduled job: puts the Flow tab on that project, account included, and proves it got there.
+// Flow bounces a signed-out or unknown account to /u/0/ or /about, so the address is checked after the page settles,
+// and any mismatch throws: the job then fails with nothing spent instead of generating in the wrong account.
+export async function ensureProject(url: string): Promise<void> {
+  const want = projectRoot(url);
+  if (!want) throw new Error(`Not a Flow project address: ${url}. Nothing was generated.`);
+  refuseAvoidedAccount(want.index);
+  const page = await getFlowPage();
+  const here = projectRoot(page.url());
+  if (here && here.index === want.index && here.id === want.id) return;
+  await page.goto(inEnglish(want.root), { waitUntil: "domcontentloaded" });
+  // waitForURL alone would match the address before any bounce; the pause lets Flow redirect first.
+  await page.waitForURL(/\/project\//, { timeout: 30_000 }).catch(() => {});
+  await pause(page, 3000);
+  const got = projectRoot(page.url());
+  if (!got || got.index !== want.index || got.id !== want.id) {
+    throw new Error(
+      `Could not open ${want.root} for this job: the Flow window ended up on ${page.url()}. Account /u/${want.index}/ may be signed out, or the project belongs to another account (check flow_accounts). Nothing was generated.`,
+    );
+  }
 }
 
 // Points the Flow tab at another project, in whichever signed-in account owns it. Every later job runs there.
 export async function openProject(url: string): Promise<FlowState> {
   if (!/^https:\/\/flow\.google\.com\/(u\/\d+\/)?project\/[0-9a-f-]{36}/.test(url)) throw new Error(`Not a Flow project address: ${url}`);
+  refuseAvoidedAccount(projectRoot(url)?.index ?? 0);
   const page = await getFlowPage();
   await page.goto(inEnglish(url), { waitUntil: "domcontentloaded" });
   await page.waitForURL(/\/project\//, { timeout: 30_000 }).catch(() => {});

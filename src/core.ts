@@ -8,9 +8,12 @@ import { KOKORO_DEFAULT_VOICE, KOKORO_MB, KOKORO_VOICES, kokoroReady, speakWithK
 import { extractFirstFrame, extractFrameAt, extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { presenter } from "./presenter.js";
-import { characterLook, createCharacter, collectAssets, createProject, listAccounts, openProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
-import { JobQueue, type Job } from "./queue.js";
-import { BIN, COMPUTER, moveToBin } from "./platform.js";
+import { characterLook, createCharacter, collectAssets, createProject, currentTab, ensureProject, listAccounts, openProject, downloadAsset, projectRoot, refuseAvoidedTab, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { JobQueue, parseStartAt, type Job, type SceneParams } from "./queue.js";
+import { BIN, COMPUTER, isAwake, keepAwake, moveToBin } from "./platform.js";
+import { HOME_DIR } from "./chrome.js";
+import { avoidAccounts, CONFIG_FILE, ensureConfig, refuseAvoidedAccount } from "./config.js";
+import { releasePidLock, takePidLock } from "./lock.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
 export const OUTPUT_ROOT = process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out");
@@ -123,11 +126,20 @@ const captionFields = {
     ),
 };
 
+const scheduleFields = {
+  start_at: z
+    .string()
+    .optional()
+    .describe("Hold these jobs until then: 'HH:MM' (24 h, this computer's time; already past today = tomorrow), '+90m' / '+2h', or an ISO datetime. The reply's starts_at confirms it."),
+  open_project: z.string().optional().describe("Project address from flow_accounts to switch the Flow window to right before these jobs run."),
+};
+
 export const shapes = {
   status: { detailed: z.boolean().default(true).describe("false skips the plan/credits readout, which briefly opens Flow's account panel.") },
   generate: {
     project: z.string().min(1).describe("Folder name for the downloaded clips, e.g. 'HotelPromo'."),
     scenes: z.array(sceneSchema).min(1).max(100),
+    ...scheduleFields,
   },
   wait: {
     job_ids: z.array(z.string()).optional().describe("Job ids from a queued call, or the task_id of a call that answered still_working. Default: every queued job."),
@@ -310,6 +322,7 @@ export const shapes = {
       .array(z.array(z.string()))
       .optional()
       .describe("One list per scene, in scene order: the reference names that scene uses (empty list for none). Without it the agent decides which references fit each scene."),
+    ...scheduleFields,
   },
   voices: {},
   narrate: {
@@ -397,7 +410,10 @@ export const shapes = {
         "The character's whole description AFTER the change, e.g. the old one with 'navy coat' swapped for 'red coat'. Scenes quote it word for word to hold the design, so a stale colour in it fights the new portrait. Without it, the change is added to the end of the old description.",
       ),
   },
-  accounts: {},
+  accounts: {
+    credits: z.boolean().default(false).describe("Also read each account's balance, plan and refresh time (opens the account panel in a throwaway tab, ~3 s per account)."),
+    only: z.array(z.number().int().min(0).max(7)).max(8).optional().describe("Account indexes to read, e.g. [2,3,5]. Default: all."),
+  },
   open_project: {
     url: z.string().min(1).describe("Project address from flow_accounts, e.g. https://flow.google.com/u/1/project/<id>. The Flow window switches to it, account included."),
   },
@@ -428,11 +444,40 @@ export const shapes = {
   techniques: { category: z.enum(["camera", "product", "transition", "image"]).optional() },
 };
 
+// generate and agent refuse unknown keys: zod would otherwise drop a misspelt "start_time" or "openProject" without a
+// word and the paid job would start at once. Only these two (other tools keep accepting extra keys, as callers expect).
+export const strictInputs = {
+  generate: z.strictObject(shapes.generate),
+  agent: z.strictObject(shapes.agent),
+};
+
+// The zod error as one plain sentence; an unknown key is named, with a hint for the schedule fields.
+export function inputError(err: z.ZodError): string {
+  return err.issues
+    .map((i) => {
+      const where = i.path.join(".");
+      if (i.code === "unrecognized_keys") {
+        const keys = (i as { keys: string[] }).keys;
+        return `Unknown field${keys.length > 1 ? "s" : ""} ${keys.map((k) => `"${k}"`).join(", ")}${where ? ` in ${where}` : ""} (scheduling uses "start_at" and "open_project"). Nothing was queued.`;
+      }
+      return `${where || "input"}: ${i.message}`;
+    })
+    .join("; ");
+}
+
 type Args<K extends keyof typeof shapes> = z.infer<z.ZodObject<(typeof shapes)[K]>>;
 
-export const jobView = ({ id, status, params, files, attempts, credits, progress, note, error, failed_scenes }: Job) => ({
+export const jobView = ({ id, status, params, files, attempts, credits, progress, note, error, failed_scenes, createdAt, startedAt, finishedAt, notBefore }: Job) => ({
   id,
   status,
+  kind: params.agent_scenes?.length ? "agent" : params.type,
+  model: params.model,
+  count: params.agent_scenes?.length ?? params.variants ?? 1,
+  duration: params.duration,
+  resolution: params.resolution,
+  createdAt,
+  startedAt,
+  finishedAt,
   project: params.output_dir,
   scene: params.file_stem,
   prompt: params.prompt,
@@ -443,6 +488,9 @@ export const jobView = ({ id, status, params, files, attempts, credits, progress
   note,
   error,
   failed_scenes,
+  // Scheduled start (ISO); the job shows "queued" until then. open_project: the project it runs in.
+  not_before: notBefore !== undefined ? new Date(notBefore).toISOString() : undefined,
+  open_project: params.open_url,
 });
 
 // One implementation runs in whichever process owns the Flow tab; the other process talks to it over HTTP (remote.ts).
@@ -501,8 +549,121 @@ export const VOICES = [
 
 const BUSY = "A generation is running in the Flow tab. Wait for it to finish (flow_wait), then retry.";
 
+// What this build understands. A client checks it before sending start_at, because an older owner would drop the field
+// and start the paid job at once.
+export const CAPABILITIES = ["start_at", "account_credits"];
+const STARTED_AT = new Date(Date.now() - process.uptime() * 1000).toISOString();
+
+const inWords = (ms: number) => {
+  const m = Math.max(0, Math.round(ms / 60_000));
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+
+// The do-not-use list for the panel; an unreadable list is reported, not thrown (status must always answer).
+export const avoidView = () => {
+  try {
+    return { avoid_accounts: avoidAccounts() };
+  } catch (err) {
+    return { avoid_accounts: [] as number[], avoid_accounts_error: err instanceof Error ? err.message : String(err) };
+  }
+};
+
+const scheduleReply = (notBefore: number | undefined) =>
+  notBefore === undefined
+    ? {}
+    : { starts_at: new Date(notBefore).toISOString(), starts_local: new Date(notBefore).toLocaleString(), starts_in: inWords(notBefore - Date.now()) };
+
+// Which project new jobs run in, worked out BEFORE anything is queued: nothing may throw after the first add, or a
+// caller sees an error for jobs that are in fact queued, sends them again and pays twice. A scheduled job, or one with
+// open_project, is pinned: the Flow tab is switched to its project right before it runs. So that switch cannot drag
+// other work into the wrong account, the unpinned jobs already waiting are pinned to the project the tab is on now
+// (pinWaiting), and while pinned jobs are pending every new job is pinned there too. Unknown tab project = refuse.
+// Module functions, not LocalCore methods: the HTTP API exposes every method of the core.
+async function planPins(queue: JobQueue, open_project: string | undefined, scheduled: boolean): Promise<{ url?: string; pinWaiting?: string }> {
+  // Read first: an unreadable do-not-use list refuses everything (fail closed).
+  const avoid = avoidAccounts();
+  let explicit: string | undefined;
+  if (open_project !== undefined) {
+    const p = projectRoot(open_project.trim());
+    if (!p) throw new Error(`open_project is not a Flow project address: ${open_project}. Use one from flow_accounts, e.g. https://flow.google.com/u/2/project/<id>. Nothing was queued.`);
+    refuseAvoidedAccount(p.index, avoid);
+    explicit = p.root;
+  }
+  const jobs = queue.list();
+  const pinning = explicit !== undefined || scheduled;
+  const waitingUnpinned = jobs.some((j) => j.status === "queued" && !j.params.open_url);
+  const pinnedPending = jobs.some((j) => (j.status === "queued" || j.status === "running") && j.params.open_url);
+  // The tab is always read (a peek, no navigation): its account decides about every job that runs where the tab is.
+  const tab = await currentTab();
+  const here = tab.root;
+  const blind = "The Flow window shows no open project right now (or Chrome is not running), so";
+  let out: { url?: string; pinWaiting?: string } = {};
+  if (pinning) {
+    if (!explicit && !here) throw new Error(`${blind} a scheduled job cannot be tied to a project. Pass open_project (an address from flow_accounts). Nothing was queued.`);
+    if (waitingUnpinned && !here) throw new Error(`${blind} the jobs already waiting cannot be kept in their project while this one switches it. Pass open_project, or wait for them to finish. Nothing was queued.`);
+    out = { url: explicit ?? here, pinWaiting: waitingUnpinned ? here : undefined };
+  } else if (pinnedPending) {
+    if (!here) throw new Error(`${blind} this job cannot be kept in its project while scheduled or pinned jobs are waiting. Pass open_project. Nothing was queued.`);
+    out = { url: here };
+  }
+  // A job that runs where the tab is (unpinned, or pinned to the tab's project) must not land in an avoided account.
+  // Unknown (Chrome down) is allowed here: the runner checks again right before generating and fails closed.
+  const usesTab = !out.url || out.url === here;
+  if (usesTab && tab.account !== undefined && avoid.includes(tab.account)) {
+    throw new Error(
+      `The Flow window is on account /u/${tab.account}/, which is on the do-not-use list (avoid_accounts in ${CONFIG_FILE}). Switch to a project in another account first (Conta e projeto in the panel, or flow_open_project), or pass open_project. Nothing was queued.`,
+    );
+  }
+  return out;
+}
+
+// generate/agent/edit/continue/retry plan their pins and queue their jobs one call at a time, so two calls cannot both
+// decide on the same queue state. The chain never rejects, so one failed call does not jam the next.
+let planning: Promise<unknown> = Promise.resolve();
+export function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const run = planning.then(fn);
+  planning = run.catch(() => undefined);
+  return run;
+}
+
+function applyPins(queue: JobQueue, pinWaiting: string | undefined): void {
+  if (!pinWaiting) return;
+  for (const j of queue.list()) if (j.status === "queued" && !j.params.open_url) j.params.open_url = pinWaiting;
+}
+
 export class LocalCore implements Core {
+  #restored = false;
+  #queueNote: string | null = null;
+
+  constructor() {
+    ensureConfig();
+    // Only the owner's queue ever holds jobs, so only the owner keeps the Mac awake.
+    this.queue.onChange = () => keepAwake(this.queue.pending);
+  }
+
+  // Owner process only (studio.ts, index.ts when it binds the port): brings back the queue a previous owner left in
+  // HOME/queue.json and keeps that file current. Clients never call it. Safe to call twice (the HTTP API can reach it).
+  restoreQueue(port?: number) {
+    if (this.#restored) return { already_restored: true };
+    this.#restored = true;
+    // Two owners on different ports share this home: only the one holding queue.lock restores and saves queue.json.
+    // The other keeps its queue in memory only and never runs a saved job.
+    const lockFile = join(HOME_DIR, "queue.lock");
+    const lock = takePidLock(lockFile, port !== undefined ? { port } : {});
+    if (!lock.ok) {
+      this.#queueNote = `queue.json belongs to another Flow Studio (${lock.reason}); this one did not restore it and keeps its queue in memory only.`;
+      console.error(`[flow-mcp] ${this.#queueNote}`);
+      return { skipped: true, reason: lock.reason };
+    }
+    process.on("exit", () => releasePidLock(lockFile));
+    return this.queue.restoreFrom(join(HOME_DIR, "queue.json"));
+  }
+
   private queue: JobQueue = new JobQueue(async (job) => {
+    // First of all: a pinned or scheduled job runs in its own project and account, or not at all.
+    if (job.params.open_url) await ensureProject(job.params.open_url);
+    // And every job, pinned or not: the tab's account is checked right before generating. Avoided or unknown = fail.
+    await refuseAvoidedTab();
     const { chain_from, reference_from } = job.params;
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
@@ -530,11 +691,23 @@ export class LocalCore implements Core {
   });
 
   async status({ detailed }: Args<"status">) {
-    const flow = await getFlowState(detailed && !this.queue.busy);
-    return { flow, pacing: this.queue.pausedReason, output_root: OUTPUT_ROOT, jobs: this.queue.list().map(jobView) };
+    // The detailed readout opens the account panel in the Flow tab, so it holds the queue while it does (a scheduled
+    // job coming due waits a few seconds); when a job is running it falls back to the plain readout, never to BUSY.
+    const flow = detailed && !this.queue.busy ? await this.queue.exclusive(() => getFlowState(true), BUSY).catch(() => getFlowState(false)) : await getFlowState(false);
+    return {
+      flow, pacing: this.queue.pausedReason, paused_until: this.queue.pausedUntil, pause_range: this.queue.pauseRange, now: Date.now(),
+      next_start: this.queue.nextStart, awake: isAwake(), capabilities: CAPABILITIES, pid: process.pid, started_at: STARTED_AT,
+      ...(this.#queueNote || this.queue.persistError ? { queue_file_error: this.#queueNote ?? this.queue.persistError } : {}),
+      ...avoidView(),
+      output_root: OUTPUT_ROOT, jobs: this.queue.list().map(jobView),
+    };
   }
 
-  async generate({ project, scenes }: Args<"generate">) {
+  async generate(a: Args<"generate">) {
+    return serial(() => this.#generate(a));
+  }
+
+  async #generate({ project, scenes, start_at, open_project }: Args<"generate">) {
     const invalid = scenes.findIndex((s, i) => s.chain_previous && (i === 0 || s.first_frame || s.type === "image"));
     if (invalid >= 0) {
       throw new Error(`Scene ${invalid + 1}: chain_previous needs a preceding video scene in the same call and cannot be combined with first_frame.`);
@@ -543,13 +716,17 @@ export class LocalCore implements Core {
     if (noPrev >= 0) throw new Error("Scene 1 has no previous scene to reference.");
     const unknown = scenes.find((s) => s.technique && !techniqueById(s.technique));
     if (unknown) throw new Error(`Unknown technique "${unknown.technique}". Call flow_techniques for valid ids.`);
+    const notBefore = start_at !== undefined ? parseStartAt(start_at) : undefined;
+    const pins = await planPins(this.queue, open_project, notBefore !== undefined);
 
+    // From here on everything is synchronous: the numbering below cannot race another call, and every job is built
+    // before the first one is queued, so a failure can never leave half a call queued.
     const output_dir = projectDir(project);
     // Continue numbering after whatever is already on disk or queued, so reruns never overwrite earlier scenes.
     const onDisk = existsSync(output_dir) ? readdirSync(output_dir).map((f) => Number(f.match(/^scene-(\d+)/)?.[1] ?? 0)) : [];
     const queued = this.queue.list().filter((j) => j.params.output_dir === output_dir).map((j) => Number(j.params.file_stem.match(/\d+/)?.[0] ?? 0));
     const offset = Math.max(0, ...onDisk, ...queued);
-    const jobs: Job[] = [];
+    const built: { params: SceneParams; chain: boolean; refPrev: boolean }[] = [];
     for (const [i, { chain_previous, reference_previous, technique, outfit, on_screen_text, ...scene }] of scenes.entries()) {
       const phrase = technique ? techniqueById(technique)!.phrase : "";
       // A referenced character must come out identical, not merely similar, so the scene says so explicitly. The
@@ -578,30 +755,53 @@ export class LocalCore implements Core {
         // near-duplicates. Keep the look, let the prompt decide where the camera is.
         ? " Keep the same subject, place, colour palette, lighting and rendering style as the previous image. The camera position and framing follow this prompt, not the previous image."
         : "";
-      jobs.push(
-        this.queue.add({
+      built.push({
+        params: {
           ...scene,
           prompt: `${textFirst}${scene.prompt.trim().replace(/\.?$/, ".")}${phrase ? ` ${phrase}` : ""}${lock}${inherit}${textLast}`,
-          chain_from: chain_previous ? jobs[i - 1].id : undefined,
-          reference_from: reference_previous ? jobs[i - 1].id : undefined,
+          open_url: pins.url,
           output_dir,
           file_stem: `scene-${String(offset + i + 1).padStart(2, "0")}`,
-        }),
-      );
+        },
+        chain: Boolean(chain_previous),
+        refPrev: Boolean(reference_previous),
+      });
     }
-    return { output_dir, jobs: jobs.map(jobView) };
+    applyPins(this.queue, pins.pinWaiting);
+    const jobs: Job[] = [];
+    for (const [i, b] of built.entries()) {
+      const prev = i > 0 ? jobs[i - 1].id : undefined;
+      jobs.push(this.queue.add({ ...b.params, chain_from: b.chain ? prev : undefined, reference_from: b.refPrev ? prev : undefined }, notBefore));
+    }
+    return { output_dir, jobs: jobs.map(jobView), ...scheduleReply(notBefore) };
   }
 
   async wait({ job_ids, timeout_seconds }: Args<"wait">) {
+    // An id the queue does not know is NOT a finished job: it was lost (an owner restart before queue.json existed, or
+    // a typo), and Flow may well have run it. Saying "finished" there is how a shot once got paid for twice.
+    const unknown_ids = (job_ids ?? []).filter((id) => !this.queue.get(id));
     const pick = () => (job_ids ? job_ids.map((id) => this.queue.get(id)).filter((j): j is Job => Boolean(j)) : this.queue.list());
     const deadline = Date.now() + timeout_seconds * 1000;
-    while (Date.now() < deadline && pick().some((j) => j.status === "queued" || j.status === "running")) {
+    // A job scheduled beyond this wait is not waited for (that would burn a whole call per 40 s for hours).
+    const live = (j: Job) => j.status === "running" || (j.status === "queued" && (j.notBefore ?? 0) <= deadline);
+    while (Date.now() < deadline && pick().some(live)) {
       await new Promise((r) => setTimeout(r, 3000));
     }
     const jobs = pick();
+    const now = Date.now();
+    const scheduled = jobs.filter((j) => j.status === "queued" && (j.notBefore ?? 0) > now);
+    const next = scheduled.length ? Math.min(...scheduled.map((j) => j.notBefore!)) : null;
     return {
-      finished: jobs.every((j) => j.status !== "queued" && j.status !== "running"),
+      finished: !unknown_ids.length && jobs.every((j) => j.status !== "queued" && j.status !== "running"),
       pacing: this.queue.pausedReason,
+      ...(scheduled.length && !jobs.some(live) ? { waiting_for_schedule: true } : {}),
+      ...(next !== null ? { next_start: next, next_start_local: new Date(next).toLocaleString(), note: `Scheduled job(s) start ${new Date(next).toLocaleString()} (in ${inWords(next - now)}); no need to keep calling flow_wait until then.` } : {}),
+      ...(unknown_ids.length
+        ? {
+            unknown_ids,
+            unknown_note: "These ids are not in the queue: the owner process may have restarted and lost them. Flow may still have run them and charged for them: check flow_assets before queuing them again.",
+          }
+        : {}),
       jobs: jobs.map(jobView),
     };
   }
@@ -617,12 +817,19 @@ export class LocalCore implements Core {
     return { removed: removed.length, remaining: this.queue.list().length };
   }
 
-  async retry({ job_ids }: Args<"retry">) {
+  async retry(a: Args<"retry">) {
+    return serial(() => this.#retry(a));
+  }
+
+  async #retry({ job_ids }: Args<"retry">) {
     const ids = job_ids ?? this.queue.list().filter((j) => j.status === "failed" || j.failed_scenes?.length).map((j) => j.id);
+    // A retried job without a project of its own is pinned like a new one while scheduled or pinned jobs wait.
+    const pins = await planPins(this.queue, undefined, false);
     const jobs: Job[] = [];
     for (const id of ids) {
       const job = this.queue.get(id);
       const p = job?.params;
+      if (p && !p.open_url && pins.url && (job.status === "failed" || job.status === "cancelled" || job.failed_scenes?.length)) p.open_url = pins.url;
       if (job?.failed_scenes?.length && p?.agent_scenes && job.status === "done") {
         // A batch that finished with some images still failed: make just those again, under their own scene numbers,
         // instead of re-running the whole batch. The list moves to the new job, so it is never retried twice.
@@ -649,27 +856,29 @@ export class LocalCore implements Core {
     return { jobs: jobs.map(jobView) };
   }
 
+  // Everything that drives the Flow tab outside the queue goes through exclusive(): refused while a job runs, and no
+  // job (a scheduled one coming due included) starts until it is done.
   async assets({ kind }: Args<"assets">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    return (await listAssets()).filter((a) => !kind || a.kind === kind).map(({ name, kind }) => ({ name, kind }));
+    return this.queue.exclusive(async () => (await listAssets()).filter((a) => !kind || a.kind === kind).map(({ name, kind }) => ({ name, kind })), BUSY);
   }
 
   async download({ project, assets, quality }: Args<"download">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    const dir = projectDir(project);
-    mkdirSync(dir, { recursive: true });
-    const files: string[] = [];
-    // Numbering from 1 every call overwrote clips fetched earlier - it destroyed a finished shot once. Carry on from
-    // the highest clip-NN already on disk instead.
-    let next = Math.max(0, ...readdirSync(dir).map((f) => Number(f.match(/^clip-(\d+)/)?.[1] ?? 0))) + 1;
-    for (const name of assets) {
-      try {
-        files.push(...(await downloadAsset(name, join(dir, `clip-${String(next++).padStart(2, "0")}`), quality)));
-      } catch (err) {
-        throw new Error(`${err instanceof Error ? err.message : err} (downloaded so far: ${files.length})`);
+    return this.queue.exclusive(async () => {
+      const dir = projectDir(project);
+      mkdirSync(dir, { recursive: true });
+      const files: string[] = [];
+      // Numbering from 1 every call overwrote clips fetched earlier - it destroyed a finished shot once. Carry on from
+      // the highest clip-NN already on disk instead.
+      let next = Math.max(0, ...readdirSync(dir).map((f) => Number(f.match(/^clip-(\d+)/)?.[1] ?? 0))) + 1;
+      for (const name of assets) {
+        try {
+          files.push(...(await downloadAsset(name, join(dir, `clip-${String(next++).padStart(2, "0")}`), quality)));
+        } catch (err) {
+          throw new Error(`${err instanceof Error ? err.message : err} (downloaded so far: ${files.length})`);
+        }
       }
-    }
-    return { dir, files };
+      return { dir, files };
+    }, BUSY);
   }
 
   async assemble({ project, voice_lines, ...rest }: Args<"assemble">) {
@@ -712,7 +921,11 @@ export class LocalCore implements Core {
     return `${prefix}-${String(Math.max(0, ...onDisk, ...queued) + 1).padStart(2, "0")}`;
   }
 
-  async agent({ project, scenes, aspect_ratio, download_quality, references, scene_references }: Args<"agent">) {
+  async agent(a: Args<"agent">) {
+    return serial(() => this.#agent(a));
+  }
+
+  async #agent({ project, scenes, aspect_ratio, download_quality, references, scene_references, start_at, open_project }: Args<"agent">) {
     const output_dir = projectDir(project);
     if (scene_references && scene_references.length !== scenes.length) {
       throw new Error(`scene_references has ${scene_references.length} entries for ${scenes.length} scenes; give one list per scene (empty for none).`);
@@ -723,24 +936,36 @@ export class LocalCore implements Core {
     for (const r of references ?? []) {
       if (!r.image.startsWith("asset:") && !existsSync(r.image)) throw new Error(`Reference image not found: ${r.image}`);
     }
-    const job = this.queue.add({
-      agent_refs: references?.length ? references : undefined,
-      agent_scene_refs: references?.length ? scene_references : undefined,
-      prompt: `Agent batch: ${scenes.length} images`,
-      type: "image",
-      max_credits: 0,
-      aspect_ratio,
-      download_quality,
-      agent_scenes: scenes,
-      output_dir,
-      file_stem: this.nextStem(output_dir, "scene"),
-    });
-    return { output_dir, jobs: [jobView(job)] };
+    const notBefore = start_at !== undefined ? parseStartAt(start_at) : undefined;
+    const pins = await planPins(this.queue, open_project, notBefore !== undefined);
+    applyPins(this.queue, pins.pinWaiting);
+    const job = this.queue.add(
+      {
+        agent_refs: references?.length ? references : undefined,
+        agent_scene_refs: references?.length ? scene_references : undefined,
+        prompt: `Agent batch: ${scenes.length} images`,
+        type: "image",
+        max_credits: 0,
+        aspect_ratio,
+        download_quality,
+        agent_scenes: scenes,
+        open_url: pins.url,
+        output_dir,
+        file_stem: this.nextStem(output_dir, "scene"),
+      },
+      notBefore,
+    );
+    return { output_dir, jobs: [jobView(job)], ...scheduleReply(notBefore) };
   }
 
-  async edit({ project, asset, prompt, download_quality }: Args<"edit">) {
+  async edit(a: Args<"edit">) {
+    return serial(() => this.#edit(a));
+  }
+
+  async #edit({ project, asset, prompt, download_quality }: Args<"edit">) {
     const output_dir = projectDir(project);
-    const job = this.queue.add({ prompt, type: "video", max_credits: 0, edit_asset: asset, download_quality, output_dir, file_stem: this.nextStem(output_dir, "edit") });
+    const pins = await planPins(this.queue, undefined, false);
+    const job = this.queue.add({ prompt, type: "video", max_credits: 0, edit_asset: asset, download_quality, open_url: pins.url, output_dir, file_stem: this.nextStem(output_dir, "edit") });
     return { output_dir, jobs: [jobView(job)] };
   }
 
@@ -764,19 +989,23 @@ export class LocalCore implements Core {
       }
     }
     const output_dir = projectDir(project);
-    const job = this.queue.add({
-      prompt,
-      type: "video",
-      max_credits: 0,
-      continue_from: from_asset,
-      attach,
-      continue_mode: mode,
-      aspect_ratio,
-      download_quality,
-      output_dir,
-      file_stem: this.nextStem(output_dir, "shot"),
+    return serial(async () => {
+      const pins = await planPins(this.queue, undefined, false);
+      const job = this.queue.add({
+        prompt,
+        type: "video",
+        max_credits: 0,
+        open_url: pins.url,
+        continue_from: from_asset,
+        attach,
+        continue_mode: mode,
+        aspect_ratio,
+        download_quality,
+        output_dir,
+        file_stem: this.nextStem(output_dir, "shot"),
+      });
+      return { output_dir, jobs: [jobView(job)] };
     });
-    return { output_dir, jobs: [jobView(job)] };
   }
 
   // Moves a file or a project folder from the films folder to the system's bin - recoverable from there, never
@@ -791,35 +1020,32 @@ export class LocalCore implements Core {
   }
 
   async trash({ name }: Args<"trash">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    return trashAsset(name);
+    return this.queue.exclusive(() => trashAsset(name), BUSY);
   }
 
   async collect({ collection, items }: Args<"collect">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    return collectAssets(collection, items);
+    return this.queue.exclusive(() => collectAssets(collection, items), BUSY);
   }
 
-  async accounts(_: Args<"accounts">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    return listAccounts();
+  // exclusive(): refuses while a job runs AND holds back any job (a scheduled one coming due) until the read is done.
+  async accounts({ credits, only }: Args<"accounts">) {
+    // Reading balances takes ~3 s per account: it stops reading new panels after 90 s and holds the queue 120 s at most.
+    return this.queue.exclusive(() => listAccounts({ credits, only, creditsDeadline: Date.now() + 90_000 }), BUSY, 120_000);
   }
 
   async open_project({ url }: Args<"open_project">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    return openProject(url);
+    return this.queue.exclusive(() => openProject(url), BUSY);
   }
 
   async new_project({ title }: Args<"new_project">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    const made = await createProject(title);
+    const made = await this.queue.exclusive(() => createProject(title), BUSY);
     return { ...made, note: "The Flow window now has this empty project open; every generation goes into it. Characters belong to a project, so make them again here." };
   }
 
   async character(a: Args<"character">) {
     if (this.queue.busy) throw new Error(BUSY);
     if (!a.image && !a.describe) throw new Error("Pass either `describe` (Flow draws the portrait) or `image`.");
-    const made = await createCharacter(a);
+    const made = await this.queue.exclusive(() => createCharacter(a), BUSY);
     // Every scene quotes the saved description in its character lock, so a character made from a picture must not
     // inherit an older description saved under the same name: it described someone else (a "Maya" with a ponytail and
     // a mustard sweater, when the new picture showed loose hair and a grey tee).
@@ -830,8 +1056,7 @@ export class LocalCore implements Core {
   }
 
   async character_edit({ name, change, look }: Args<"character_edit">) {
-    if (this.queue.busy) throw new Error(BUSY);
-    const out = await editCharacter(name, change);
+    const out = await this.queue.exclusive(() => editCharacter(name, change), BUSY);
     // Every scene that references the character quotes this description in its character lock, so it has to describe
     // the NEW look - "deep navy coat" left in it would argue with a portrait whose coat is now red.
     if (look) rememberCharacter(name, look);
@@ -840,8 +1065,7 @@ export class LocalCore implements Core {
   }
 
   async characters() {
-    if (this.queue.busy) throw new Error(BUSY);
-    return (await listCharacters()).map((name) => ({ name, use_as: `asset:${name}` }));
+    return this.queue.exclusive(async () => (await listCharacters()).map((name) => ({ name, use_as: `asset:${name}` })), BUSY);
   }
 
   // Panel only: deliberately NOT registered as an MCP tool, so a key typed into Flow Studio never reaches Claude.
