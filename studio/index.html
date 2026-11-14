@@ -78,7 +78,8 @@ a:hover{text-decoration:underline}
 .hint{margin:12px 0 0;padding:12px 14px;background:rgba(255,214,10,.1);border-radius:var(--r-sm);font-size:14px;color:var(--text)}
 
 /* ---------- painéis ---------- */
-.panel{display:none;max-width:980px}
+.panel{display:none;max-width:1120px}
+.panel[data-panel="prompts"],.panel[data-panel="research"]{max-width:none}
 .panel.on{display:block;animation:rise .35s var(--ease) both}
 @keyframes rise{from{opacity:0;transform:translateY(6px)}}
 .step{margin-top:20px;font:600 13px var(--sans);color:var(--safe)}
@@ -312,7 +313,7 @@ dialog h2{font-size:24px}
 .pprod{display:flex;gap:10px;align-items:center;margin-top:12px;padding:9px 12px;border-radius:var(--r-sm);background:var(--safe-soft);font-size:14px}
 .pprod span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pprod button{flex:none;border:0;background:none;color:var(--dim);font:500 18px/1 var(--sans);cursor:pointer}
-.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-top:12px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:12px}
 .pcard{display:flex;flex-direction:column;min-width:0;background:var(--panel);border-radius:var(--r);overflow:hidden;animation:rise .3s var(--ease) both}
 .pmedia{position:relative;aspect-ratio:9/16;background:#121214;overflow:hidden;cursor:pointer}
 .pmedia>img,.pmedia>video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
@@ -1603,6 +1604,8 @@ function tickEta() {
 setInterval(tickEta, 1000);
 /* ---------- conta e projeto ---------- */
 let ACCTS = null, curUrl = "", queueActive = false, AVOID = [];
+// Última lista de contas guardada neste navegador: o Flow não deixa ler as contas enquanto gera, e sem ela o Monitor só mostraria "conta u/3".
+try { ACCTS = JSON.parse(localStorage.getItem("fs_accts") || "null"); } catch {}
 const isAvoided = (a) => Boolean(a?.avoid) || AVOID.includes(a?.index);
 const caps = () => renderStatus.st?.capabilities ?? [];
 // "PRO · 812 créditos · renova 23:25 · lido há 3 min", só com o que o servidor leu.
@@ -1629,7 +1632,7 @@ function whereWords(url) {
   if (!m) return "";
   const u = Number(m[1] || 0), acc = ACCTS?.find((a) => a.projects.some((p) => p.id === m[2])) ?? ACCTS?.find((a) => a.index === u);
   const proj = acc?.projects.find((p) => p.id === m[2]);
-  return `conta ${acc ? acc.email.split("@")[0] : u + 1} · ${proj ? `projeto ${proj.title || "sem nome"}` : "projeto escolhido"}`;
+  return `${acc ? acc.email.split("@")[0] : `conta u/${u}`} · ${proj ? `projeto ${proj.title || "sem nome"}` : "projeto escolhido"}`;
 }
 const curIds = () => { const m = curUrl.match(/\/u\/(\d+)\/project\/([0-9a-f-]{36})/) ?? curUrl.match(/()\/project\/([0-9a-f-]{36})/); return m ? { u: Number(m[1] || 0), id: m[2] } : null; };
 function whereLabel(inProject = true) {
@@ -1637,7 +1640,7 @@ function whereLabel(inProject = true) {
   const c = curIds(); if (!c) return "Projeto aberto no Flow";
   const acc = ACCTS?.find((a) => a.projects.some((p) => p.id === c.id)) ?? ACCTS?.find((a) => a.index === c.u);
   const proj = acc?.projects.find((p) => p.id === c.id);
-  return acc ? `${acc.email.split("@")[0]} · ${proj?.title ?? "projeto aberto"}` : `Conta ${c.u + 1} · projeto aberto`;
+  return acc ? `${acc.email.split("@")[0]} · ${proj?.title ?? "projeto aberto"}` : `Conta u/${c.u} · projeto aberto`;
 }
 function renderAccts() {
   const c = curIds();
@@ -1650,7 +1653,7 @@ async function loadAccts(show, credits = false) {
   const withCredits = credits && caps().includes("account_credits");
   if (show && !ACCTS) $("#acctList").innerHTML = `<p class="empty">Lendo as contas do Flow… (abre uma aba rápida no Chrome do Flow)</p>`;
   else if (show && withCredits) $("#acctList").insertAdjacentHTML("afterbegin", `<p class="empty" id="acctReading">Lendo saldo e renovação de cada conta…</p>`);
-  try { ACCTS = await api("accounts", withCredits ? { credits: true } : {}); renderAccts(); fillWhere(); $("#whereName").textContent = whereLabel(); }
+  try { ACCTS = await api("accounts", withCredits ? { credits: true } : {}); try { localStorage.setItem("fs_accts", JSON.stringify(ACCTS)); } catch {} renderAccts(); fillWhere(); $("#whereName").textContent = whereLabel(); renderStatus.sig = null; }
   catch (err) {
     $("#acctReading")?.remove();
     if (show && !ACCTS) $("#acctList").innerHTML = `<p class="empty" style="color:var(--bad)">${esc(err.message)}</p>`;
@@ -1784,9 +1787,11 @@ function filteredPrompts() {
   const all = list.length;
   if (pr.cat !== "all") list = list.filter((it) => it.category === pr.cat);
   const time = (it) => (it.date ? Date.parse(it.date) : 0);
-  const byRecent = (a, b) => (b.own - a.own) || (time(b) - time(a)) || ((a.order ?? 0) - (b.order ?? 0));
+  // Prompts com exemplo (vídeo ou imagem) vêm primeiro em qualquer ordem: é o que dá para ver antes de usar.
+  const hasMedia = (it) => (it.example?.path || httpUrl(it.example?.url) ? 1 : 0);
+  const byRecent = (a, b) => (hasMedia(b) - hasMedia(a)) || (b.own - a.own) || (time(b) - time(a)) || ((a.order ?? 0) - (b.order ?? 0));
   const score = (it) => (it.copies + it.uses) * 1e6 + (it.popularity ?? 0);
-  list.sort(pr.sort === "used" ? (a, b) => score(b) - score(a) || byRecent(a, b) : byRecent);
+  list.sort(pr.sort === "used" ? (a, b) => (hasMedia(b) - hasMedia(a)) || score(b) - score(a) || byRecent(a, b) : byRecent);
   return { list, counts, all };
 }
 
